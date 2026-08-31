@@ -8,7 +8,7 @@
 #include "telegram/media_processor.hpp"
 
 #include <boost/asio.hpp>
-#include <core/blocking_executor.hpp>
+#include <core/actor/blocking_executor.hpp>
 #include <memory>
 
 namespace bridge {

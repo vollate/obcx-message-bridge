@@ -1,6 +1,6 @@
 #include "bridge_db_runtime.hpp"
 
-#include <core/db_manager.hpp>
+#include <core/infrastructure/db_manager.hpp>
 #include <gtest/gtest.h>
 
 #include <chrono>

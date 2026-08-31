@@ -1,10 +1,10 @@
 #include "common/config_loader.hpp"
-#include "core/actor_runtime_reload_controller.hpp"
-#include "core/bot_installation_directory.hpp"
-#include "core/bot_operation_dispatcher.hpp"
-#include "core/db_manager.hpp"
-#include "core/message_event_ingress.hpp"
-#include "core/orchestrator.hpp"
+#include "core/bot/bot_installation_directory.hpp"
+#include "core/bot/bot_operation_dispatcher.hpp"
+#include "core/infrastructure/db_manager.hpp"
+#include "core/runtime/actor_runtime_reload_controller.hpp"
+#include "core/runtime/message_event_ingress.hpp"
+#include "core/runtime/orchestrator.hpp"
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>

@@ -2,8 +2,8 @@
 #include "bridge_storage_models.hpp"
 #include "common/config_loader.hpp"
 #include "config.hpp"
-#include "core/blocking_executor.hpp"
-#include "core/db_manager.hpp"
+#include "core/actor/blocking_executor.hpp"
+#include "core/infrastructure/db_manager.hpp"
 #include "qq/message_formatter.hpp"
 
 #include <boost/asio/co_spawn.hpp>
@@ -911,12 +911,11 @@ TEST(BridgeHandlerRepositoryTest,
 TEST(BridgeHandlerRepositoryTest,
      ActorOnlyEntryPointOwnsForwardingWithoutRawPersistence) {
   const auto source_root = std::filesystem::path{OBCX_BRIDGE_SOURCE_DIR};
-  const auto qq_handler = source_root / "dependency" / "qq" / "handler.cpp";
-  const auto tg_handler =
-      source_root / "dependency" / "telegram" / "handler.cpp";
+  const auto qq_handler = source_root / "src" / "qq" / "handler.cpp";
+  const auto tg_handler = source_root / "src" / "telegram" / "handler.cpp";
   const auto actor = source_root / "actor" / "bridge_actor.cpp";
   const auto forwarding_runtime =
-      source_root / "dependency" / "bridge_forwarding_runtime.cpp";
+      source_root / "src" / "bridge_forwarding_runtime.cpp";
 
   auto read_file = [](const std::filesystem::path &path) {
     std::ifstream stream(path);

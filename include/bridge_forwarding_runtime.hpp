@@ -6,7 +6,7 @@
 #include "received_message_repository.hpp"
 
 #include <boost/asio/any_io_executor.hpp>
-#include <core/blocking_executor.hpp>
+#include <core/actor/blocking_executor.hpp>
 
 #include <atomic>
 #include <memory>

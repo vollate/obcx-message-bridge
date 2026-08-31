@@ -5,7 +5,7 @@
 #include "received_message_repository.hpp"
 
 #include <common/json_utils.hpp>
-#include <core/bot_operation_client.hpp>
+#include <core/bot/bot_operation_client.hpp>
 
 #include <chrono>
 #include <stdexcept>

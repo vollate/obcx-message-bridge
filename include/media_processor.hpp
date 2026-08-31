@@ -4,7 +4,7 @@
 
 #include <boost/asio.hpp>
 #include <chrono>
-#include <core/blocking_executor.hpp>
+#include <core/actor/blocking_executor.hpp>
 #include <fstream>
 #include <string>
 #include <utility>

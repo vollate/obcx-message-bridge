@@ -4,7 +4,7 @@
 #include "bridge_state_migration.hpp"
 #include "bridge_storage_models.hpp"
 
-#include <core/db_manager.hpp>
+#include <core/infrastructure/db_manager.hpp>
 
 #include <atomic>
 #include <chrono>

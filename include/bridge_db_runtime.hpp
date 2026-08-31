@@ -1,6 +1,6 @@
 #pragma once
 
-#include <core/db_manager.hpp>
+#include <core/infrastructure/db_manager.hpp>
 
 #include <memory>
 #include <string>

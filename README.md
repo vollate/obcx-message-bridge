@@ -44,10 +44,10 @@ cmake --install build --prefix /tmp/bridge-package
 ```
 
 Bridge owns forwarding, mapping, media, retry, installed pipeline, and
-bot-facing reload behavior tests. `OBCX_BRIDGE_BUILD_TESTS` follows
-`BUILD_TESTING` when Bridge is configured as the top-level project and defaults
-to `OFF` when OBCX embeds Bridge as an actor subdirectory; an embedding consumer
-may explicitly override it. The release coordinator additionally enables
+bot-facing reload behavior tests. In a top-level build,
+`OBCX_BRIDGE_BUILD_TESTS` follows `BUILD_TESTING`; when OBCX embeds Bridge as an
+actor subdirectory it is `OFF` unless the embedding consumer explicitly enables
+it. The release coordinator additionally enables
 `OBCX_BRIDGE_CONFORMANCE_TESTS` and supplies the installed Message Store actor
 and shared install prefix so Bridge registers, runs, and installs its cross-actor
 pipeline and reload smoke executables from this repository.
@@ -60,6 +60,45 @@ share/obcx/actors/vollate.bridge/actor.toml
 ```
 
 ## Runtime Configuration
+
+Bridge does not resolve a live bot, transport, token, or process capability
+registry. Root bot tables define exact process-owned installations, and Bridge
+uses only the installed `BotOperationClient` service:
+
+```toml
+[bots.qq_bot]
+enabled = true
+surface = "onebot11.qq"
+transport = "websocket"
+
+[bots.qq_bot.connection]
+host = "127.0.0.1"
+port = 3001
+access_token = ""
+connect_timeout_ms = 5000
+action_timeout_ms = 30000
+
+[bots.telegram_bot]
+enabled = true
+surface = "telegram.bot_api"
+transport = "http"
+
+[bots.telegram_bot.connection]
+host = "api.telegram.org"
+port = 443
+access_token = "YOUR_TELEGRAM_BOT_TOKEN"
+bot_username = "your_bot_username"
+use_tls = true
+connect_timeout_ms = 5000
+action_timeout_ms = 30000
+poll_timeout_ms = 25000
+poll_force_close_ms = 30000
+poll_retry_interval_ms = 3000
+```
+
+Only `onebot11.qq + websocket`, `onebot11.qq + http`, and
+`telegram.bot_api + http` are implemented. Unknown or unsupported combinations
+fail validation; there is no provider or transport fallback.
 
 The supported pipeline is:
 
@@ -86,11 +125,12 @@ allowing message-store to persist the source event; the inherited
 no-op so the command is neither executed nor forwarded twice. A command actor
 that returns `Consume` prevents the ordinary pipeline from running at all.
 
-QQ notices use a separate actor pipeline. The runtime converts platform
-`NoticeEvent` values into `obcx::core::events::RawNoticeEvent`; bridge consumes
-that typed input to retain the former plugin behavior for QQ poke and group
-recall notices. Configure the `pipelines.notice` stage shown in the example;
-the actor does not register bot callbacks directly.
+QQ notices use a separate actor pipeline. The installation event-ingress
+component converts provider events into runtime `NoticeEvent` values, and the
+runtime then emits `obcx::core::events::RawNoticeEvent`; Bridge consumes that
+typed input for QQ poke and group-recall behavior. Configure the
+`pipelines.notice` stage shown in the example; the actor does not register bot
+callbacks directly.
 
 The actor uses the core `DbManager` service. `db = "main"` selects the
 configured database instance and `db_namespace = "bridge"` isolates the
@@ -141,15 +181,15 @@ onebot11_installation = "qq_bot"
 # qq_conversation_id = "group:123456789"
 ```
 
-`image_placeholder_url` must be a direct image URL. It defaults to a PNG that
-shows `NOT FOUND`; the embedded image is used only if this URL cannot be
-downloaded or validated.
+`image_placeholder_url` must be configured as a direct image URL. The example
+uses a PNG that shows `NOT FOUND`; the embedded image is used only if the
+configured URL cannot be downloaded or validated.
 
 `qq_media_download_max_bytes` bounds each full QQ image downloaded after
-Telegram rejects direct URL delivery. It defaults to and cannot exceed 10 MiB,
-the public Telegram photo limit. A failed, expired, invalid, or oversized item
-is replaced during multipart fallback without discarding valid peers in the
-same media group.
+Telegram rejects direct URL delivery. Configure it in the range
+`1..10485760`; 10 MiB is the public Telegram photo limit. A failed, expired,
+invalid, or oversized item is replaced during multipart fallback without
+discarding valid peers in the same media group.
 
 Before multipart upload, the fallback also checks Telegram's photo-dimension
 rules: width plus height must not exceed 10,000 pixels and the larger-to-smaller
@@ -196,10 +236,10 @@ downloads, timers, and other asynchronous transport operations remain on their
 Asio executor. Do not add `std::async`, detached threads, or actor-local thread
 pools for synchronous work.
 
-`ffmpeg_path` may be an absolute executable path; its default, `ffmpeg`, uses
-the process `PATH`. `action_timeout` should remain above the upstream
-first-media-send latency; 30 seconds is the example default. Telegram
-`poll_force_close` must be larger than `poll_timeout`.
+`ffmpeg_path` may be an absolute executable path; the explicit value `ffmpeg`
+uses the process `PATH`. Configure root `action_timeout_ms` above the upstream
+first-media-send latency. Telegram `poll_force_close_ms` must be at least
+`poll_timeout_ms`.
 
 ### Conversation-scoped schema migration
 
@@ -217,10 +257,11 @@ Message Store source identity and a current route or migration-only
 `legacy_mapping_routes` entry. Telegram thread metadata selects an exact
 topic-to-group route when configured; a chat-wide group-to-group route applies
 to every forum thread in that chat and therefore does not require a synthetic
-topic-history entry. The default
-`legacy_unresolved_mapping_policy = "fail"` rolls back the complete transaction
-when a source conversation, historical target route, or album primary cannot be
-proven. `"archive"` is an explicit operator choice: unresolved mapping/media
+topic-history entry. Configure
+`legacy_unresolved_mapping_policy = "fail"` to roll back the complete
+transaction when a source conversation, historical target route, or album
+primary cannot be proven. `"archive"` is an explicit operator choice:
+unresolved mapping/media
 rows are retained in namespaced version-2 archive tables, but forwarding,
 de-duplication, replies, edits, recalls, commands, and retries never query
 those tables. Pending retries cannot be archived or retargeted and block
@@ -312,11 +353,12 @@ or route is reported as unavailable and never replaced by another bot, group,
 or chat. Successful completion writes the same two conversations into the
 mapping before removing only that exact retry row.
 
-The defaults are 5 maximum attempts, a 2-second base backoff, a 10-second queue
-check interval, and a 300-second maximum backoff. All four values must be
-positive; the base and check intervals must not exceed the maximum. Startup,
-`--validate-config`, and reload reject invalid values with
-`reload_actor_config_invalid` before activating the generation.
+Configure `message_retry_max_attempts`,
+`message_retry_base_interval_sec`, `retry_queue_check_interval_sec`, and
+`max_retry_interval_sec` explicitly; the example uses 5, 2, 10, and 300.
+All four values must be positive, and the base and check intervals must not
+exceed the maximum. Startup, `--validate-config`, and reload reject invalid
+values with `reload_actor_config_invalid` before activating the generation.
 
 Diagnostics distinguish an explicitly disabled queue (`消息发送失败且未启用重试`)
 from an enabled but unavailable queue (`消息发送失败且重试队列不可用`). Retry logs

@@ -5,7 +5,7 @@
 
 #include <boost/asio.hpp>
 #include <common/message_type.hpp>
-#include <core/blocking_executor.hpp>
+#include <core/actor/blocking_executor.hpp>
 #include <memory>
 #include <optional>
 #include <string>

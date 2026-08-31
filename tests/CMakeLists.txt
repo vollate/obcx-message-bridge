@@ -119,7 +119,7 @@ if(OBCX_BRIDGE_CONFORMANCE_TESTS)
             "Bridge conformance requires an absolute shared install prefix")
   endif()
   if(NOT IS_ABSOLUTE "${OBCX_CORE_SOURCE_DIR}" OR
-     NOT EXISTS "${OBCX_CORE_SOURCE_DIR}/include/core/orchestrator.hpp")
+     NOT EXISTS "${OBCX_CORE_SOURCE_DIR}/include/core/runtime/orchestrator.hpp")
     message(FATAL_ERROR
             "Bridge runtime conformance requires the coordinated OBCX source tree")
   endif()

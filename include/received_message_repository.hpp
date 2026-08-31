@@ -2,7 +2,7 @@
 
 #include "bridge_storage_models.hpp"
 
-#include <core/db_manager.hpp>
+#include <core/infrastructure/db_manager.hpp>
 
 #include <optional>
 #include <string>

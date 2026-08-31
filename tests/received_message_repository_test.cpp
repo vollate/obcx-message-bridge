@@ -1,5 +1,5 @@
 #include "common/config_loader.hpp"
-#include "core/db_manager.hpp"
+#include "core/infrastructure/db_manager.hpp"
 #include "received_message_repository.hpp"
 
 #include <gtest/gtest.h>

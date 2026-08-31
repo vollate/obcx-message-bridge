@@ -1,6 +1,6 @@
 #include "bridge_state_repository.hpp"
 #include "common/config_loader.hpp"
-#include "core/db_manager.hpp"
+#include "core/infrastructure/db_manager.hpp"
 #include "retry_queue_manager.hpp"
 
 #include <boost/asio/io_context.hpp>

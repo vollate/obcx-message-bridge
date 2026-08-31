@@ -1,7 +1,7 @@
 #pragma once
 
-#include <core/actor.hpp>
-#include <core/actor_commands.hpp>
+#include <core/actor/actor.hpp>
+#include <core/actor/actor_commands.hpp>
 
 #include <boost/asio/awaitable.hpp>
 

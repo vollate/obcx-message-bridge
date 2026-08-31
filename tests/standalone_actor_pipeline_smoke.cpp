@@ -1,10 +1,10 @@
 #include "bridge_forwarder.hpp"
 
 #include "common/config_loader.hpp"
-#include "core/actor_manager.hpp"
-#include "core/blocking_executor.hpp"
-#include "core/db_manager.hpp"
-#include "core/orchestrator.hpp"
+#include "core/actor/actor_manager.hpp"
+#include "core/actor/blocking_executor.hpp"
+#include "core/infrastructure/db_manager.hpp"
+#include "core/runtime/orchestrator.hpp"
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>

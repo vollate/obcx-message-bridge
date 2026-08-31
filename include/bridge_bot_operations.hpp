@@ -2,7 +2,7 @@
 
 #include <boost/asio/awaitable.hpp>
 #include <common/message_type.hpp>
-#include <core/bot_operation_client.hpp>
+#include <core/bot/bot_operation_client.hpp>
 
 #include <cstddef>
 #include <cstdint>
