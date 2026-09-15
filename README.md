@@ -1,6 +1,6 @@
-# OBCX Bridge Actor
+# OBCX Message Bridge
 
-`obcx-actor-bridge` is the native ABI 2 actor that forwards stored messages
+`obcx-message-bridge` is the native ABI 2 actor that forwards stored messages
 between QQ and Telegram. It consumes
 `obcx::message_store::events::MessageStored` through generated reflected
 dispatch and performs bot I/O with `ActorContext::await_asio`. Successful and

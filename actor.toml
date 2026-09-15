@@ -27,6 +27,6 @@ reflection_macro = 202506
 input_contract_schema = 2
 
 [publication]
-repository = "https://github.com/vollate/obcx-actor-bridge"
+repository = "https://github.com/vollate/obcx-message-bridge"
 license = "MIT"
 description = "QQ and Telegram bidirectional bridge actor for OBCX"
