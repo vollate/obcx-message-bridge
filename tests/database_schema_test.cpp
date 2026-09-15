@@ -1,7 +1,7 @@
 #include "bridge_message_identity.hpp"
 #include "bridge_state_repository.hpp"
 #include "bridge_storage_models.hpp"
-#include "common/config_loader.hpp"
+#include "common/config_snapshot.hpp"
 #include "core/infrastructure/db_manager.hpp"
 
 #include <gtest/gtest.h>

@@ -1,6 +1,6 @@
 #include "bridge_forwarder.hpp"
 
-#include "common/config_loader.hpp"
+#include "common/config_snapshot.hpp"
 #include "core/actor/actor_manager.hpp"
 #include "core/actor/blocking_executor.hpp"
 #include "core/infrastructure/db_manager.hpp"

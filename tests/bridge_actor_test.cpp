@@ -1,7 +1,8 @@
+#include "actor_config_fixture.hpp"
 #include "bridge_actor.hpp"
 #include "bridge_forwarder.hpp"
 #include "bridge_state_repository.hpp"
-#include "common/config_loader.hpp"
+#include "common/config_snapshot.hpp"
 #include "config.hpp"
 #include "core/actor/blocking_executor.hpp"
 #include "core/actor/native_actor_scheduler.hpp"
@@ -310,7 +311,7 @@ enable_tg_to_qq = true
 )";
   }
 
-  auto built = obcx::common::ConfigLoader::build_snapshot(config_path.string());
+  auto built = obcx::test::actor_fixture_snapshot(config_path.string());
   ASSERT_TRUE(built);
   const auto config = bridge::load_bridge_config(
       obcx::common::ActorConfigView{built.snapshot, "bridge"});
@@ -434,15 +435,16 @@ TEST(BridgeActorTest, DeclaresTypedCommandsWithoutHandlerMetadata) {
             obcx::common::json::array({"bridge_files_dir"}));
   EXPECT_EQ(contract["configuration"]["bot_installations"]
                     ["telegram_installation"]["types"],
-            "telegram");
+            "telegram.bot_api");
   EXPECT_EQ(contract["configuration"]["bot_installations"]
                     ["onebot11_installation"]["types"],
-            "qq");
+            "onebot11.qq");
   const auto &pairs = contract["configuration"]["bot_installation_collections"]
                               ["installation_pairs"];
   EXPECT_EQ(pairs["identity"], "id");
   EXPECT_EQ(pairs["minimum_items"], 1);
-  EXPECT_EQ(pairs["bot_installations"]["telegram_installation"], "telegram");
+  EXPECT_EQ(pairs["bot_installations"]["telegram_installation"],
+            "telegram.bot_api");
   EXPECT_TRUE(std::ranges::any_of(
       contract["configuration"]["collection_identity_references"],
       [](const auto &reference) {

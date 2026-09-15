@@ -1,3 +1,4 @@
+#include "telegram/bot/operations.hpp"
 #include "telegram/media_processor.hpp"
 
 #include "bridge_state_repository.hpp"
@@ -12,7 +13,7 @@
 namespace bridge::telegram {
 
 auto TelegramMediaProcessor::process_sticker(
-    const obcx::bot::TelegramFileRef &media_info,
+    const obcx::telegram::bot::TelegramFileRef &media_info,
     const nlohmann::json &media_data)
     -> boost::asio::awaitable<obcx::common::MessageSegment> {
 
@@ -66,7 +67,7 @@ auto TelegramMediaProcessor::process_sticker(
 }
 
 auto TelegramMediaProcessor::download_sticker_with_cache(
-    const obcx::bot::TelegramFileRef &media_info,
+    const obcx::telegram::bot::TelegramFileRef &media_info,
     const std::string &bridge_files_dir)
     -> boost::asio::awaitable<std::optional<std::string>> {
 

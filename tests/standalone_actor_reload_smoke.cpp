@@ -1,10 +1,13 @@
-#include "common/config_loader.hpp"
+#include "app/builtin_bot_platforms.hpp"
+#include "common/config_snapshot.hpp"
 #include "core/bot/bot_installation_directory.hpp"
 #include "core/bot/bot_operation_dispatcher.hpp"
+#include "core/bot/messaging.hpp"
 #include "core/infrastructure/db_manager.hpp"
 #include "core/runtime/actor_runtime_reload_controller.hpp"
 #include "core/runtime/message_event_ingress.hpp"
 #include "core/runtime/orchestrator.hpp"
+#include "onebot11/bot/operations.hpp"
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -37,46 +40,59 @@ namespace {
 using namespace std::chrono_literals;
 namespace fs = std::filesystem;
 
-class LiveQQEndpoint final : public obcx::core::BotOperationEndpoint {
+template <typename Request, typename Implementation>
+auto registry_for(std::shared_ptr<Implementation> implementation)
+    -> std::shared_ptr<obcx::core::OperationRegistry> {
+  const auto installation = implementation->installation();
+  auto registry = std::make_shared<obcx::core::OperationRegistry>(installation);
+  registry->install(obcx::core::OperationDefinition<Request>{{}}.bind(
+      [implementation](const Request &request) {
+        return implementation->execute(request);
+      }));
+  registry->seal(installation, {});
+  return registry;
+}
+
+class LiveQQEndpoint final {
 public:
-  [[nodiscard]] auto installation() const
-      -> obcx::bot::BotInstallationRef override {
+  [[nodiscard]] auto installation() const -> obcx::bot::BotInstallationRef {
     return {.installation_id = "qq_live",
-            .surface = obcx::bot::BotSurface::OneBot11Qq};
+            .surface = obcx::bot::SurfaceId{"onebot11.qq"}};
   }
 
   [[nodiscard]] auto declared_actions() const
-      -> std::vector<obcx::bot::BotAction> override {
-    return {obcx::bot::BotAction::GetOneBotGroupMember};
+      -> std::vector<obcx::bot::ActionId> {
+    return {obcx::onebot11::bot::GetOneBotGroupMemberRequest::action};
   }
 
-  auto execute(const obcx::bot::GetOneBotGroupMemberRequest &request)
+  auto execute(const obcx::onebot11::bot::GetOneBotGroupMemberRequest &request)
       -> asio::awaitable<obcx::bot::BotOperationResult<
-          obcx::bot::OneBotGroupMember>> override {
+          obcx::onebot11::bot::OneBotGroupMember>> {
     co_return obcx::bot::BotOperationResult<
-        obcx::bot::OneBotGroupMember>::success({.target = request.target,
-                                                .user_id = request.user_id,
-                                                .nickname = "reload-user"});
+        obcx::onebot11::bot::OneBotGroupMember>::success({.target =
+                                                              request.target,
+                                                          .user_id =
+                                                              request.user_id,
+                                                          .nickname =
+                                                              "reload-user"});
   }
 };
 
-class RecordingTelegramEndpoint final
-    : public obcx::core::BotOperationEndpoint {
+class RecordingTelegramEndpoint final {
 public:
-  [[nodiscard]] auto installation() const
-      -> obcx::bot::BotInstallationRef override {
+  [[nodiscard]] auto installation() const -> obcx::bot::BotInstallationRef {
     return {.installation_id = "telegram_live",
-            .surface = obcx::bot::BotSurface::TelegramBotApi};
+            .surface = obcx::bot::SurfaceId{"telegram.bot_api"}};
   }
 
   [[nodiscard]] auto declared_actions() const
-      -> std::vector<obcx::bot::BotAction> override {
-    return {obcx::bot::BotAction::SendGroupMessage};
+      -> std::vector<obcx::bot::ActionId> {
+    return {obcx::bot::SendGroupMessageRequest::action};
   }
 
-  auto
-  execute(const obcx::bot::SendGroupMessageRequest &request) -> asio::awaitable<
-      obcx::bot::BotOperationResult<obcx::bot::SendMessageResult>> override {
+  auto execute(const obcx::bot::SendGroupMessageRequest &request)
+      -> asio::awaitable<
+          obcx::bot::BotOperationResult<obcx::bot::SendMessageResult>> {
     std::size_t sequence = 0;
     bool fail = false;
     {
@@ -430,8 +446,11 @@ auto main(int argc, char **argv) -> int {
     write_file(config_path, config_document(database_path, root / "files",
                                             argv[1], argv[2], "telegram-old"));
 
-    auto parsed = obcx::core::RuntimeGenerationBuilder::parse_config(
-        config_path.string());
+    const auto platform_catalog =
+        obcx::app::make_builtin_bot_platform_catalog();
+    auto parsed =
+        obcx::core::RuntimeGenerationBuilder{platform_catalog}.parse_config(
+            config_path.string());
     require(static_cast<bool>(parsed), "initial reload config did not parse");
 
     auto database = obcx::core::DbManager::shared_manager(
@@ -439,13 +458,23 @@ auto main(int argc, char **argv) -> int {
     qq = std::make_shared<LiveQQEndpoint>();
     telegram = std::make_shared<RecordingTelegramEndpoint>();
     auto directory = std::make_shared<obcx::core::BotInstallationDirectory>();
-    directory->register_capabilities(qq->installation(), qq);
-    directory->register_capabilities(telegram->installation(), telegram);
-    auto dispatcher = std::make_shared<obcx::core::BotOperationDispatcher>();
-    dispatcher->register_endpoint(qq);
-    dispatcher->register_endpoint(telegram);
+    auto qq_registry =
+        registry_for<obcx::onebot11::bot::GetOneBotGroupMemberRequest>(qq);
+    auto telegram_registry =
+        registry_for<obcx::bot::SendGroupMessageRequest>(telegram);
+    directory->register_capabilities(qq->installation(), qq_registry);
+    directory->register_capabilities(telegram->installation(),
+                                     telegram_registry);
+    auto dispatcher = std::make_shared<obcx::core::BotOperationDispatcher>(
+        [](const obcx::bot::SurfaceId &surface) {
+          return surface == obcx::bot::SurfaceId{"onebot11.qq"} ||
+                 surface == obcx::bot::SurfaceId{"telegram.bot_api"};
+        });
+    dispatcher->register_endpoint(qq_registry);
+    dispatcher->register_endpoint(telegram_registry);
+    dispatcher->seal_registrations();
 
-    obcx::core::RuntimeGenerationBuilder builder;
+    obcx::core::RuntimeGenerationBuilder builder{platform_catalog};
     auto initial = builder.build({
         .purpose = obcx::core::RuntimeGenerationBuildPurpose::Startup,
         .generation_id = 1,
@@ -633,8 +662,9 @@ auto main(int argc, char **argv) -> int {
     require(controller->active_generation()->bot_installation_directory() ==
                 directory,
             "reload replaced the process-owned installation directory");
-    require(directory->endpoint(qq->installation()) == qq &&
-                directory->endpoint(telegram->installation()) == telegram,
+    require(directory->endpoint(qq->installation()) == qq_registry &&
+                directory->endpoint(telegram->installation()) ==
+                    telegram_registry,
             "reload replaced process-owned operation capabilities");
     require(std::ranges::count(telegram->messages(),
                                std::string{"/tp 2072 ~ 1080"}) == 1,

@@ -1,4 +1,5 @@
 #pragma once
+#include "telegram/bot/operations.hpp"
 
 #include "bridge_bot_operations.hpp"
 #include "config.hpp"
@@ -33,24 +34,24 @@ public:
                           std::vector<std::string> &temp_files_to_cleanup)
       -> boost::asio::awaitable<std::vector<obcx::common::MessageSegment>>;
   auto download_sticker_with_cache(
-      const obcx::bot::TelegramFileRef &media_info,
+      const obcx::telegram::bot::TelegramFileRef &media_info,
       const std::string &bridge_files_dir = "/tmp/bridge_files")
       -> boost::asio::awaitable<std::optional<std::string>>;
   auto download_animation_with_cache(
-      const obcx::bot::TelegramFileRef &media_info,
+      const obcx::telegram::bot::TelegramFileRef &media_info,
       const std::string &bridge_files_dir = "/tmp/bridge_files")
       -> boost::asio::awaitable<std::optional<std::string>>;
 
 private:
-  auto process_downloaded_file(const obcx::bot::FetchedTelegramFile &file,
-                               std::string output_type,
-                               const std::string &filename,
-                               std::vector<std::string> &temp_files_to_cleanup)
+  auto process_downloaded_file(
+      const obcx::telegram::bot::FetchedTelegramFile &file,
+      std::string output_type, const std::string &filename,
+      std::vector<std::string> &temp_files_to_cleanup)
       -> boost::asio::awaitable<obcx::common::MessageSegment>;
-  auto process_sticker(const obcx::bot::TelegramFileRef &media_info,
+  auto process_sticker(const obcx::telegram::bot::TelegramFileRef &media_info,
                        const nlohmann::json &media_data)
       -> boost::asio::awaitable<obcx::common::MessageSegment>;
-  auto process_animation(const obcx::bot::TelegramFileRef &media_info,
+  auto process_animation(const obcx::telegram::bot::TelegramFileRef &media_info,
                          const nlohmann::json &media_data,
                          const std::string &filename)
       -> boost::asio::awaitable<obcx::common::MessageSegment>;

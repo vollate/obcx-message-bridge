@@ -1,4 +1,5 @@
 #pragma once
+#include "core/bot/typed_operation.hpp"
 
 #include "bridge_bot_operations.hpp"
 #include "bridge_forwarder.hpp"
@@ -32,7 +33,7 @@ public:
 class BridgeForwardingRuntime final : public IBridgeForwarder {
 public:
   BridgeForwardingRuntime(
-      std::shared_ptr<obcx::bot::BotOperationClient> operation_client,
+      std::shared_ptr<obcx::bot::BotOperationGateway> operation_client,
       std::shared_ptr<const BridgeConfig> config,
       std::shared_ptr<BridgeStateRepository> state_repository,
       std::shared_ptr<ReceivedMessageRepository> received_message_repository,

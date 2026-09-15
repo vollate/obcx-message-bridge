@@ -1,4 +1,5 @@
 #pragma once
+#include "telegram/bot/operations.hpp"
 
 #include "bridge_bot_operations.hpp"
 #include "config.hpp"
@@ -111,7 +112,8 @@ private:
       const std::vector<PreparedMedia> &media, std::string_view caption,
       std::optional<std::int64_t> topic_id,
       std::optional<std::string> reply_to_message_id,
-      const std::vector<obcx::bot::TelegramTextEntity> &caption_entities = {})
+      const std::vector<obcx::telegram::bot::TelegramTextEntity>
+          &caption_entities = {})
       -> boost::asio::awaitable<MediaGroupFallbackResult>;
   auto get_user_display_name(const std::string &user_id,
                              const std::string &group_id)

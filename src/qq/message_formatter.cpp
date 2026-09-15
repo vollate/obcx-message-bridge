@@ -1,4 +1,5 @@
 #include "qq/message_formatter.hpp"
+#include "telegram/bot/operations.hpp"
 
 #include "bridge_state_repository.hpp"
 #include "qq/image_url_validator.hpp"
@@ -85,7 +86,7 @@ public:
       if (input.bad() || file_data.size() != image.data.size()) {
         throw std::runtime_error("cannot read QQ media temporary file");
       }
-      result.uploads_.push_back(obcx::bot::TelegramMediaUpload{
+      result.uploads_.push_back(obcx::telegram::bot::TelegramMediaUpload{
           .type = std::move(image.type),
           .filename = std::move(filename),
           .mime_type = std::move(image.mime_type),
@@ -97,7 +98,7 @@ public:
   }
 
   [[nodiscard]] auto uploads() const
-      -> const std::vector<obcx::bot::TelegramMediaUpload> & {
+      -> const std::vector<obcx::telegram::bot::TelegramMediaUpload> & {
     return uploads_;
   }
 
@@ -116,7 +117,7 @@ private:
   }
 
   fs::path root_;
-  std::vector<obcx::bot::TelegramMediaUpload> uploads_;
+  std::vector<obcx::telegram::bot::TelegramMediaUpload> uploads_;
 };
 
 auto is_telegram_bad_request(const std::exception &error) -> bool {
@@ -327,7 +328,7 @@ auto telegram_utf16_units(const std::string_view text) -> std::size_t {
 }
 
 auto italic_entity(std::string_view text)
-    -> std::vector<obcx::bot::TelegramTextEntity> {
+    -> std::vector<obcx::telegram::bot::TelegramTextEntity> {
   return {
       {.type = "italic", .offset = 0, .length = telegram_utf16_units(text)}};
 }
@@ -399,8 +400,8 @@ auto QQMessageFormatter::send_media_group_with_fallback(
     std::string_view telegram_group_id, const std::vector<PreparedMedia> &media,
     std::string_view caption, std::optional<int64_t> topic_id,
     std::optional<std::string> reply_to_message_id,
-    const std::vector<obcx::bot::TelegramTextEntity> &caption_entities)
-    -> boost::asio::awaitable<MediaGroupFallbackResult> {
+    const std::vector<obcx::telegram::bot::TelegramTextEntity>
+        &caption_entities) -> boost::asio::awaitable<MediaGroupFallbackResult> {
   std::vector<std::pair<std::string, std::string>> remote_media;
   remote_media.reserve(media.size());
   std::set<std::size_t> replaced_indices;
@@ -412,7 +413,7 @@ auto QQMessageFormatter::send_media_group_with_fallback(
   }
 
   try {
-    std::vector<obcx::bot::TelegramMediaSource> sources;
+    std::vector<obcx::telegram::bot::TelegramMediaSource> sources;
     sources.reserve(remote_media.size());
     for (const auto &[type, source] : remote_media) {
       sources.push_back({.type = type, .source = source});
@@ -616,9 +617,9 @@ auto QQMessageFormatter::send_media_group_with_fallback(
   std::string upload_failure_category;
   std::exception_ptr upload_cancellation;
   try {
-    const auto maximum_bytes = std::min(obcx::bot::maximum_actor_media_bytes,
-                                        config_->qq_media_download_max_bytes *
-                                            temporary.uploads().size());
+    const auto maximum_bytes = std::min(
+        obcx::telegram::bot::maximum_actor_media_bytes,
+        config_->qq_media_download_max_bytes * temporary.uploads().size());
     response = co_await operations_->send_telegram_media_uploads(
         telegram_group_id, temporary.uploads(),
         caption_with_media_recovery(caption, replaced_indices.size(),
@@ -1147,7 +1148,7 @@ auto QQMessageFormatter::send_media_group(
     if (!media_list.empty()) {
       try {
         std::string caption;
-        std::vector<obcx::bot::TelegramTextEntity> caption_entities;
+        std::vector<obcx::telegram::bot::TelegramTextEntity> caption_entities;
 
         bool show_sender = false;
         if (bridge_config->mode == BridgeMode::GROUP_TO_GROUP) {

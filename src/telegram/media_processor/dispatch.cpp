@@ -1,3 +1,4 @@
+#include "telegram/bot/operations.hpp"
 #include "telegram/media_processor.hpp"
 
 #include "bridge_state_repository.hpp"
@@ -69,7 +70,8 @@ auto TelegramMediaProcessor::process_media_file(
       co_return result;
     }
 
-    obcx::bot::TelegramFileRef file{.file_id = file_id, .file_type = file_type};
+    obcx::telegram::bot::TelegramFileRef file{.file_id = file_id,
+                                              .file_type = file_type};
     const nlohmann::json *metadata = nullptr;
     if (media_data.contains(file_type) && media_data[file_type].is_object()) {
       metadata = &media_data[file_type];

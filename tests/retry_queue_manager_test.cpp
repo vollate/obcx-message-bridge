@@ -1,5 +1,5 @@
 #include "bridge_state_repository.hpp"
-#include "common/config_loader.hpp"
+#include "common/config_snapshot.hpp"
 #include "core/infrastructure/db_manager.hpp"
 #include "retry_queue_manager.hpp"
 

@@ -135,7 +135,8 @@ if(OBCX_BRIDGE_CONFORMANCE_TESTS)
   add_executable(standalone_actor_reload_smoke
                  standalone_actor_reload_smoke.cpp)
   target_include_directories(standalone_actor_reload_smoke
-                             PRIVATE ${OBCX_CORE_SOURCE_DIR}/include)
+                             PRIVATE ${OBCX_CORE_SOURCE_DIR}/include
+                                     ${OBCX_CORE_SOURCE_DIR}/src)
   target_link_libraries(standalone_actor_reload_smoke
                         PRIVATE obcx::obcx_core)
 

@@ -1,4 +1,5 @@
 #pragma once
+#include "core/bot/typed_operation.hpp"
 
 #include "bridge_state_migration.hpp"
 
@@ -89,7 +90,7 @@ struct BridgeInstallationPair final {
 /**
  * Immutable after construction and owned by one bridge actor generation.
  * Bot endpoints and credentials intentionally do not live here: they remain
- * process-owned behind BotOperationClient and are restart-required.
+ * process-owned behind BotOperationGateway and are restart-required.
  */
 struct BridgeConfig final {
   std::unordered_map<std::string, BridgeInstallationPair> installation_pairs;

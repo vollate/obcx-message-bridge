@@ -1,7 +1,7 @@
 #include "config.hpp"
 #include "bridge_message_identity.hpp"
 
-#include <common/config_loader.hpp>
+#include <common/config_snapshot.hpp>
 #include <common/logger.hpp>
 
 #include <algorithm>

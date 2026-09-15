@@ -1,8 +1,11 @@
 #pragma once
+#include "core/bot/typed_operation.hpp"
+#include "onebot11/bot/operations.hpp"
+#include "telegram/bot/operations.hpp"
 
 #include <boost/asio/awaitable.hpp>
 #include <common/message_type.hpp>
-#include <core/bot/bot_operation_client.hpp>
+#include <core/bot/operation_gateway.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -41,7 +44,7 @@ struct BridgeOperationFailureDisposition {
 
 class BridgeBotOperations final {
 public:
-  BridgeBotOperations(std::shared_ptr<obcx::bot::BotOperationClient> client,
+  BridgeBotOperations(std::shared_ptr<obcx::bot::BotOperationGateway> client,
                       std::string telegram_installation,
                       std::string onebot11_installation,
                       std::string pair_id = "legacy");
@@ -80,31 +83,31 @@ public:
 
   auto send_telegram_photo(
       std::string_view group_id, std::string photo, std::string caption,
-      std::vector<obcx::bot::TelegramTextEntity> entities = {})
+      std::vector<obcx::telegram::bot::TelegramTextEntity> entities = {})
       -> boost::asio::awaitable<std::string>;
   auto send_telegram_media_urls(
       std::string_view group_id,
-      std::vector<obcx::bot::TelegramMediaSource> media, std::string caption,
-      std::optional<std::int64_t> topic_id = std::nullopt,
+      std::vector<obcx::telegram::bot::TelegramMediaSource> media,
+      std::string caption, std::optional<std::int64_t> topic_id = std::nullopt,
       std::optional<std::string> reply_to_message_id = std::nullopt,
-      std::vector<obcx::bot::TelegramTextEntity> entities = {})
+      std::vector<obcx::telegram::bot::TelegramTextEntity> entities = {})
       -> boost::asio::awaitable<obcx::bot::SendMessageResult>;
   auto send_telegram_media_uploads(
       std::string_view group_id,
-      std::vector<obcx::bot::TelegramMediaUpload> media, std::string caption,
-      std::size_t maximum_bytes,
+      std::vector<obcx::telegram::bot::TelegramMediaUpload> media,
+      std::string caption, std::size_t maximum_bytes,
       std::optional<std::int64_t> topic_id = std::nullopt,
       std::optional<std::string> reply_to_message_id = std::nullopt,
-      std::vector<obcx::bot::TelegramTextEntity> entities = {})
+      std::vector<obcx::telegram::bot::TelegramTextEntity> entities = {})
       -> boost::asio::awaitable<obcx::bot::SendMessageResult>;
-  auto fetch_telegram_file(obcx::bot::TelegramFileRef file,
+  auto fetch_telegram_file(obcx::telegram::bot::TelegramFileRef file,
                            std::size_t maximum_bytes)
-      -> boost::asio::awaitable<obcx::bot::FetchedTelegramFile>;
+      -> boost::asio::awaitable<obcx::telegram::bot::FetchedTelegramFile>;
 
   auto get_onebot11_group_member(std::string_view group_id,
                                  std::string_view user_id,
                                  bool no_cache = false)
-      -> boost::asio::awaitable<obcx::bot::OneBotGroupMember>;
+      -> boost::asio::awaitable<obcx::onebot11::bot::OneBotGroupMember>;
   auto get_onebot11_forward_messages(std::string_view forward_id)
       -> boost::asio::awaitable<obcx::bot::Json>;
   auto resolve_onebot11_group_file(std::string_view group_id,
@@ -126,7 +129,7 @@ private:
     return std::move(*result.value);
   }
 
-  std::shared_ptr<obcx::bot::BotOperationClient> client_;
+  std::shared_ptr<obcx::bot::BotOperationGateway> client_;
   std::string pair_id_;
   obcx::bot::BotInstallationRef telegram_;
   obcx::bot::BotInstallationRef onebot11_;

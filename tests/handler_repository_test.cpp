@@ -1,8 +1,10 @@
+#include "actor_config_fixture.hpp"
 #include "bridge_state_repository.hpp"
 #include "bridge_storage_models.hpp"
-#include "common/config_loader.hpp"
+#include "common/config_snapshot.hpp"
 #include "config.hpp"
 #include "core/actor/blocking_executor.hpp"
+#include "core/bot/typed_operation.hpp"
 #include "core/infrastructure/db_manager.hpp"
 #include "qq/message_formatter.hpp"
 
@@ -25,20 +27,25 @@
 
 namespace {
 
-class NoopBotOperationClient final : public obcx::bot::BotOperationClient {
+class NoopBotOperationGateway final : public obcx::bot::BotOperationGateway {
 public:
-  auto supported_actions(const obcx::bot::BotInstallationRef &installation)
-      const -> obcx::bot::BotOperationResult<
-          obcx::bot::SupportedBotActions> override {
-    return obcx::bot::BotOperationResult<
-        obcx::bot::SupportedBotActions>::success({.installation =
-                                                      installation});
+  auto invoke(obcx::bot::OperationEnvelope)
+      -> boost::asio::awaitable<obcx::bot::OperationReply> override {
+    co_return obcx::bot::failed_operation<obcx::bot::Json>(
+        obcx::bot::BotOperationErrorCode::UnsupportedAction, "noop gateway");
+  }
+
+  auto supported_actions(
+      const obcx::bot::BotInstallationRef &installation) const
+      -> obcx::bot::BotOperationResult<obcx::bot::SupportedActions> override {
+    return obcx::bot::BotOperationResult<obcx::bot::SupportedActions>::success(
+        {.installation = installation});
   }
 };
 
 auto noop_bridge_operations() -> std::shared_ptr<bridge::BridgeBotOperations> {
   return std::make_shared<bridge::BridgeBotOperations>(
-      std::make_shared<NoopBotOperationClient>(), "tg-main", "qq-main");
+      std::make_shared<NoopBotOperationGateway>(), "tg-main", "qq-main");
 }
 
 auto temp_db_path(const std::string &name) -> std::filesystem::path {
@@ -102,7 +109,7 @@ poll_retry_interval_ms = 3000
 )" << content;
     }
   }
-  auto built = obcx::common::ConfigLoader::build_snapshot(resolved.string());
+  auto built = obcx::test::actor_fixture_snapshot(resolved.string());
   if (resolved != path) {
     std::filesystem::remove(resolved);
   }
@@ -943,7 +950,7 @@ TEST(BridgeHandlerRepositoryTest,
             std::string::npos);
   EXPECT_NE(runtime_source.find("RetryQueueWorker"), std::string::npos);
   EXPECT_EQ(runtime_source.find("BotRegistry"), std::string::npos);
-  EXPECT_NE(runtime_source.find("BotOperationClient"), std::string::npos);
+  EXPECT_NE(runtime_source.find("BotOperationGateway"), std::string::npos);
   EXPECT_EQ(runtime_source.find("IPlugin"), std::string::npos);
   EXPECT_EQ(runtime_source.find("get_bots"), std::string::npos);
   EXPECT_NE(qq_source.find("消息发送失败且重试队列不可用"), std::string::npos);

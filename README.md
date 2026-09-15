@@ -18,7 +18,7 @@ failed attempts emit `bridge::events::MessageForwarded` and
 - Runtime dependency: `onebot-cxx.message-store >=0.1.0,<1.0.0`
 
 `OBCX_ACTOR_EXPORT_V2` exports the numeric ABI generation, factory,
-destructor, actor name, actor version, and generated schema-1 input contract.
+destructor, actor name, actor version, and generated schema-2 input contract.
 OBCX validates that contract before constructing the actor.
 
 ## Build Against An Installed SDK
@@ -63,7 +63,7 @@ share/obcx/actors/vollate.bridge/actor.toml
 
 Bridge does not resolve a live bot, transport, token, or process capability
 registry. Root bot tables define exact process-owned installations, and Bridge
-uses only the installed `BotOperationClient` service:
+uses only the installed `BotOperationGateway` service:
 
 ```toml
 [bots.qq_bot]
@@ -332,7 +332,7 @@ upsert.
 When `enable_retry_queue` is `true`, one worker belongs to the active bridge
 actor generation. A definitely-not-submitted, retryable QQ-to-Telegram or
 Telegram-to-QQ failure is stored in `bridge_message_retry_queue`; the worker
-resends through the exact-installation `BotOperationClient`, writes the
+resends through the exact-installation `BotOperationGateway`, writes the
 source-to-target mapping, and removes the queue row only after both persistence
 operations succeed. Pending runnable rows survive process restart and actor
 reload. Reload stops the retired generation's worker before post-cutover

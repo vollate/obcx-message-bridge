@@ -1,4 +1,5 @@
 #include "qq/media_processor.hpp"
+#include "telegram/bot/operations.hpp"
 
 #include "bridge_hash.hpp"
 #include "bridge_state_repository.hpp"
@@ -182,9 +183,9 @@ auto QQMediaProcessor::handle_sticker_cache(
       const std::string sender_label = fmt::format("[{}]", sender_display_name);
       std::string caption_info =
           show_sender_for_sticker ? fmt::format("{}\t", sender_label) : "";
-      std::vector<obcx::bot::TelegramTextEntity> caption_entities;
+      std::vector<obcx::telegram::bot::TelegramTextEntity> caption_entities;
       if (show_sender_for_sticker) {
-        caption_entities.push_back(obcx::bot::TelegramTextEntity{
+        caption_entities.push_back(obcx::telegram::bot::TelegramTextEntity{
             .type = "italic",
             .offset = 0,
             .length = telegram_utf16_units(sender_label)});

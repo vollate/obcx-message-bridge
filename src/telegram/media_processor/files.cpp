@@ -1,3 +1,4 @@
+#include "telegram/bot/operations.hpp"
 #include "telegram/media_processor.hpp"
 
 #include <common/logger.hpp>
@@ -11,8 +12,8 @@
 namespace bridge::telegram {
 
 auto TelegramMediaProcessor::process_downloaded_file(
-    const obcx::bot::FetchedTelegramFile &file, std::string output_type,
-    const std::string &filename,
+    const obcx::telegram::bot::FetchedTelegramFile &file,
+    std::string output_type, const std::string &filename,
     std::vector<std::string> &temp_files_to_cleanup)
     -> boost::asio::awaitable<obcx::common::MessageSegment> {
   const auto safe_name = std::filesystem::path{filename}.filename().string();

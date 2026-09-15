@@ -2,10 +2,11 @@
 #include "bridge_forwarder.hpp"
 #include "bridge_forwarding_runtime.hpp"
 #include "config.hpp"
+#include "core/bot/typed_operation.hpp"
 #include "received_message_repository.hpp"
 
 #include <common/json_utils.hpp>
-#include <core/bot/bot_operation_client.hpp>
+#include <core/bot/operation_gateway.hpp>
 
 #include <chrono>
 #include <stdexcept>
@@ -197,7 +198,7 @@ auto BridgeActor::resolve_forwarder(obcx::core::ActorContext &context,
     return forwarder_;
   }
 
-  auto operation_client = context.get_service<obcx::bot::BotOperationClient>();
+  auto operation_client = context.get_service<obcx::bot::BotOperationGateway>();
   if (!operation_client) {
     return nullptr;
   }

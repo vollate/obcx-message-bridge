@@ -1,12 +1,17 @@
 #include "bridge_bot_operations.hpp"
 #include "bridge_state_repository.hpp"
-#include "common/config_loader.hpp"
+#include "common/config_snapshot.hpp"
 #include "config.hpp"
 #include "core/actor/blocking_executor.hpp"
+#include "core/bot/messaging.hpp"
+#include "core/bot/typed_operation.hpp"
 #include "core/infrastructure/db_manager.hpp"
+#include "fake_gateway_dispatch.hpp"
+#include "onebot11/bot/operations.hpp"
 #include "qq/command_handler.hpp"
 #include "qq/event_handler.hpp"
 #include "received_message_repository.hpp"
+#include "telegram/bot/operations.hpp"
 #include "telegram/command_handler.hpp"
 
 #include <boost/asio/co_spawn.hpp>
@@ -27,19 +32,27 @@ namespace asio = boost::asio;
 
 namespace {
 
-class RecordingOperationClient final : public obcx::bot::BotOperationClient {
+class RecordingOperationClient final : public obcx::bot::BotOperationGateway {
 public:
-  auto supported_actions(const obcx::bot::BotInstallationRef &installation)
-      const -> obcx::bot::BotOperationResult<
-          obcx::bot::SupportedBotActions> override {
-    return obcx::bot::BotOperationResult<
-        obcx::bot::SupportedBotActions>::success({.installation =
-                                                      installation});
+  auto invoke(obcx::bot::OperationEnvelope envelope)
+      -> asio::awaitable<obcx::bot::OperationReply> override {
+    return obcx::tests::dispatch_fake_gateway<
+        obcx::bot::SendGroupMessageRequest, obcx::bot::DeleteMessageRequest,
+        obcx::telegram::bot::EditTelegramMessageTextRequest,
+        obcx::onebot11::bot::PokeOneBotGroupRequest>(*this,
+                                                     std::move(envelope));
   }
 
-  auto
-  execute(const obcx::bot::SendGroupMessageRequest &request) -> asio::awaitable<
-      obcx::bot::BotOperationResult<obcx::bot::SendMessageResult>> override {
+  auto supported_actions(
+      const obcx::bot::BotInstallationRef &installation) const
+      -> obcx::bot::BotOperationResult<obcx::bot::SupportedActions> override {
+    return obcx::bot::BotOperationResult<obcx::bot::SupportedActions>::success(
+        {.installation = installation});
+  }
+
+  auto execute(const obcx::bot::SendGroupMessageRequest &request)
+      -> asio::awaitable<
+          obcx::bot::BotOperationResult<obcx::bot::SendMessageResult>> {
     sends.push_back(request);
     co_return obcx::bot::BotOperationResult<obcx::bot::SendMessageResult>::
         success({.messages = {{.group = request.target,
@@ -47,37 +60,37 @@ public:
                                    "sent-" + std::to_string(sends.size())}}});
   }
 
-  auto
-  execute(const obcx::bot::DeleteMessageRequest &request) -> asio::awaitable<
-      obcx::bot::BotOperationResult<obcx::bot::DeleteMessageResult>> override {
+  auto execute(const obcx::bot::DeleteMessageRequest &request)
+      -> asio::awaitable<
+          obcx::bot::BotOperationResult<obcx::bot::DeleteMessageResult>> {
     deletions.push_back(request);
     co_return obcx::bot::BotOperationResult<
         obcx::bot::DeleteMessageResult>::success({.message = request.message});
   }
 
-  auto execute(const obcx::bot::EditTelegramMessageTextRequest &request)
+  auto execute(
+      const obcx::telegram::bot::EditTelegramMessageTextRequest &request)
       -> asio::awaitable<obcx::bot::BotOperationResult<
-          obcx::bot::EditMessageTextResult>> override {
+          obcx::telegram::bot::EditMessageTextResult>> {
     edits.push_back(request);
-    co_return obcx::bot::BotOperationResult<
-        obcx::bot::EditMessageTextResult>::success({.message =
-                                                        request.message});
+    co_return obcx::bot::
+        BotOperationResult<obcx::telegram::bot::EditMessageTextResult>::success(
+            {.message = request.message});
   }
 
-  auto execute(const obcx::bot::PokeOneBotGroupRequest &request)
+  auto execute(const obcx::onebot11::bot::PokeOneBotGroupRequest &request)
       -> asio::awaitable<obcx::bot::BotOperationResult<
-          obcx::bot::OneBotGroupPokeResult>> override {
+          obcx::onebot11::bot::OneBotGroupPokeResult>> {
     pokes.push_back(request);
-    co_return obcx::bot::BotOperationResult<
-        obcx::bot::OneBotGroupPokeResult>::success({.target = request.target,
-                                                    .user_id =
-                                                        request.user_id});
+    co_return obcx::bot::
+        BotOperationResult<obcx::onebot11::bot::OneBotGroupPokeResult>::success(
+            {.target = request.target, .user_id = request.user_id});
   }
 
   std::vector<obcx::bot::SendGroupMessageRequest> sends;
   std::vector<obcx::bot::DeleteMessageRequest> deletions;
-  std::vector<obcx::bot::EditTelegramMessageTextRequest> edits;
-  std::vector<obcx::bot::PokeOneBotGroupRequest> pokes;
+  std::vector<obcx::telegram::bot::EditTelegramMessageTextRequest> edits;
+  std::vector<obcx::onebot11::bot::PokeOneBotGroupRequest> pokes;
 };
 
 template <typename T> auto run(asio::awaitable<T> operation) -> T {
@@ -108,6 +121,65 @@ auto text_from(const obcx::common::Message &message) -> std::string {
     }
   }
   return text;
+}
+
+TEST(BridgeOperationFailureTest, IncludesProviderCodeAndDescription) {
+  const bridge::BridgeBotOperationFailure error({
+      .code = obcx::bot::BotOperationErrorCode::ProviderRejected,
+      .message = "Bad Request: chat not found",
+      .provider_code = "400",
+  });
+  const auto result = bridge::classify_bridge_operation_failure(error);
+  EXPECT_EQ(
+      result.diagnostic,
+      "provider_rejected (provider_code=400): Bad Request: chat not found");
+  EXPECT_FALSE(result.retryable);
+  EXPECT_FALSE(result.outcome_unknown);
+}
+
+TEST(BridgeOperationFailureTest, IncludesDescriptionWithoutProviderCode) {
+  const bridge::BridgeBotOperationFailure error({
+      .code = obcx::bot::BotOperationErrorCode::TransportFailure,
+      .message = "Connection refused",
+      .retryable = true,
+  });
+  const auto result = bridge::classify_bridge_operation_failure(error);
+  EXPECT_EQ(result.diagnostic, "transport_failure: Connection refused");
+  EXPECT_TRUE(result.retryable);
+  EXPECT_FALSE(result.outcome_unknown);
+}
+
+TEST(BridgeOperationFailureTest, RedactsSensitiveProviderDetails) {
+  const bridge::BridgeBotOperationFailure error({
+      .code = obcx::bot::BotOperationErrorCode::ProviderRejected,
+      .message = "Failed to fetch https://example.com/private?token=secret",
+      .provider_code = "token=secret",
+  });
+  const auto result = bridge::classify_bridge_operation_failure(error);
+  EXPECT_EQ(result.diagnostic,
+            "provider_rejected (provider_code=[redacted provider diagnostic]): "
+            "[redacted provider diagnostic]");
+}
+
+TEST(BridgeOperationFailureTest, PreservesUnknownOutcomeSafety) {
+  const bridge::BridgeBotOperationFailure error({
+      .code = obcx::bot::BotOperationErrorCode::OutcomeUnknown,
+      .message = "Response lost",
+      .retryable = true,
+      .submission_safety = obcx::bot::SubmissionSafety::PossiblySubmitted,
+  });
+  const auto result = bridge::classify_bridge_operation_failure(error);
+  EXPECT_EQ(result.diagnostic, "outcome_unknown: Response lost");
+  EXPECT_FALSE(result.retryable);
+  EXPECT_TRUE(result.outcome_unknown);
+}
+
+TEST(BridgeOperationFailureTest, DoesNotExposeUnclassifiedExceptionDetails) {
+  const std::runtime_error error("token=secret");
+  const auto result = bridge::classify_bridge_operation_failure(error);
+  EXPECT_EQ(result.diagnostic, "unclassified_exception");
+  EXPECT_FALSE(result.retryable);
+  EXPECT_TRUE(result.outcome_unknown);
 }
 
 TEST(BridgeCommandOperationTest, RecallUsesTypedDeleteAndReplySend) {
@@ -146,7 +218,7 @@ TEST(BridgeCommandOperationTest, RecallUsesTypedDeleteAndReplySend) {
   EXPECT_EQ(client->deletions[0].message.native_message_id, "200");
   ASSERT_EQ(client->sends.size(), 1U);
   EXPECT_EQ(client->sends[0].target.installation.surface,
-            obcx::bot::BotSurface::TelegramBotApi);
+            obcx::bot::SurfaceId{"telegram.bot_api"});
   EXPECT_NE(text_from(client->sends[0].message).find("撤回成功"),
             std::string::npos);
   EXPECT_TRUE(
@@ -372,9 +444,9 @@ TEST(BridgeCommandOperationTest, CheckaliveRepliesThroughTypedGroupSends) {
 
   ASSERT_EQ(client->sends.size(), 2U);
   EXPECT_EQ(client->sends[0].target.installation.surface,
-            obcx::bot::BotSurface::TelegramBotApi);
+            obcx::bot::SurfaceId{"telegram.bot_api"});
   EXPECT_EQ(client->sends[1].target.installation.surface,
-            obcx::bot::BotSurface::OneBot11Qq);
+            obcx::bot::SurfaceId{"onebot11.qq"});
   EXPECT_NE(text_from(client->sends[0].message).find("QQ平台状态"),
             std::string::npos);
 
