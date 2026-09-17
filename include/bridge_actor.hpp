@@ -25,22 +25,22 @@ namespace bridge {
 
 namespace commands {
 struct RecallCommand final : obcx::command::RequestMessage<RecallCommand> {};
-struct CheckAliveCommand final
-    : obcx::command::RequestMessage<CheckAliveCommand> {};
+struct BridgeStatusCommand final
+    : obcx::command::RequestMessage<BridgeStatusCommand> {};
 struct PokeCommand final : obcx::command::RequestMessage<PokeCommand> {};
 } // namespace commands
 
 class BridgeActor final : public obcx::core::ReflectedActor<BridgeActor> {
 public:
   static constexpr std::string_view actor_name = "bridge";
-  static constexpr std::string_view actor_version = "0.1.0";
+  static constexpr std::string_view actor_version = "0.2.0";
 
   static constexpr auto command_contract() {
     return obcx::command::catalog(
         obcx::command::observe<commands::RecallCommand>(
             "recall", "Recall the replied bridged message"),
-        obcx::command::observe<commands::CheckAliveCommand>(
-            "checkalive", "Check the bridge platform connection"),
+        obcx::command::observe<commands::BridgeStatusCommand>(
+            "bridge_status", "Show Telegram and QQ bridge status"),
         obcx::command::observe<commands::PokeCommand>(
             "poke", "Poke the replied QQ user"));
   }
@@ -116,11 +116,23 @@ public:
               const obcx::core::MessageEnvelope &message,
               obcx::core::ActorContext &context)
       -> obcx::core::ActorTask<obcx::core::ActorResult>;
+  auto handle(const obcx::core::events::RawMessageEvent &event,
+              const obcx::core::MessageEnvelope &message,
+              obcx::core::ActorContext &context)
+      -> obcx::core::ActorTask<obcx::core::ActorResult>;
+  auto handle(const obcx::core::events::BotMessageSentEvent &event,
+              const obcx::core::MessageEnvelope &message,
+              obcx::core::ActorContext &context)
+      -> obcx::core::ActorTask<obcx::core::ActorResult>;
+  auto handle(const obcx::core::events::RawHeartbeatEvent &heartbeat,
+              const obcx::core::MessageEnvelope &message,
+              obcx::core::ActorContext &context)
+      -> obcx::core::ActorTask<obcx::core::ActorResult>;
   auto handle(const commands::RecallCommand &request,
               const obcx::core::MessageEnvelope &message,
               obcx::core::ActorContext &context)
       -> obcx::core::ActorTask<obcx::core::ActorResult>;
-  auto handle(const commands::CheckAliveCommand &request,
+  auto handle(const commands::BridgeStatusCommand &request,
               const obcx::core::MessageEnvelope &message,
               obcx::core::ActorContext &context)
       -> obcx::core::ActorTask<obcx::core::ActorResult>;
@@ -130,6 +142,9 @@ public:
       -> obcx::core::ActorTask<obcx::core::ActorResult>;
 
 private:
+  auto refresh_platform_activity(const obcx::core::MessageEnvelope &message,
+                                 obcx::core::ActorContext &context)
+      -> obcx::core::ActorTask<obcx::core::ActorResult>;
   auto handle_command(const obcx::command::CommandInvocation &invocation,
                       const obcx::core::MessageEnvelope &message,
                       obcx::core::ActorContext &context)

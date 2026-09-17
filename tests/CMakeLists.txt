@@ -101,7 +101,7 @@ gtest_discover_tests(message_event_adapter_test DISCOVERY_MODE PRE_TEST
 gtest_discover_tests(path_manager_test DISCOVERY_MODE PRE_TEST
                      PROPERTIES LABELS "${_bridge_test_labels}")
 gtest_discover_tests(image_url_validator_test DISCOVERY_MODE PRE_TEST
-                     PROPERTIES LABELS "${_bridge_test_labels}")
+                     PROPERTIES LABELS "${_bridge_test_labels}" TIMEOUT 30)
 gtest_discover_tests(photo_normalizer_test DISCOVERY_MODE PRE_TEST
                      PROPERTIES LABELS "${_bridge_test_labels}")
 gtest_discover_tests(bridge_db_runtime_test DISCOVERY_MODE PRE_TEST

@@ -233,7 +233,7 @@ auto BridgeActor::handle(const commands::RecallCommand &request,
   return handle_command(request.invocation, message, context);
 }
 
-auto BridgeActor::handle(const commands::CheckAliveCommand &request,
+auto BridgeActor::handle(const commands::BridgeStatusCommand &request,
                          const obcx::core::MessageEnvelope &message,
                          obcx::core::ActorContext &context)
     -> obcx::core::ActorTask<obcx::core::ActorResult> {
@@ -454,6 +454,51 @@ auto BridgeActor::handle(
         build_failed_event(message, "bridge_error", error.what(), true));
     co_return result;
   }
+}
+
+auto BridgeActor::refresh_platform_activity(
+    const obcx::core::MessageEnvelope &message,
+    obcx::core::ActorContext &context)
+    -> obcx::core::ActorTask<obcx::core::ActorResult> {
+  try {
+    auto repository = co_await context.run_blocking(
+        [this, &context] { return resolve_repository(context); });
+    const auto observed_at = std::chrono::system_clock::now();
+    (void)co_await context.run_blocking(
+        [repository, installation = message.source_bot,
+         platform = message.source_platform, observed_at] {
+          return repository->update_platform_heartbeat(installation, platform,
+                                                       observed_at);
+        });
+    co_return obcx::core::ActorResult::success();
+  } catch (const std::exception &error) {
+    co_return obcx::core::ActorResult::failed("bridge_activity_update_failed",
+                                              error.what(), true);
+  }
+}
+
+auto BridgeActor::handle(const obcx::core::events::RawMessageEvent &event,
+                         const obcx::core::MessageEnvelope &message,
+                         obcx::core::ActorContext &context)
+    -> obcx::core::ActorTask<obcx::core::ActorResult> {
+  (void)event;
+  return refresh_platform_activity(message, context);
+}
+
+auto BridgeActor::handle(const obcx::core::events::BotMessageSentEvent &event,
+                         const obcx::core::MessageEnvelope &message,
+                         obcx::core::ActorContext &context)
+    -> obcx::core::ActorTask<obcx::core::ActorResult> {
+  (void)event;
+  return refresh_platform_activity(message, context);
+}
+
+auto BridgeActor::handle(const obcx::core::events::RawHeartbeatEvent &heartbeat,
+                         const obcx::core::MessageEnvelope &message,
+                         obcx::core::ActorContext &context)
+    -> obcx::core::ActorTask<obcx::core::ActorResult> {
+  (void)heartbeat;
+  return refresh_platform_activity(message, context);
 }
 
 auto BridgeActor::handle(const obcx::core::events::RawNoticeEvent &notice,

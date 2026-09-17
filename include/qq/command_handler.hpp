@@ -20,8 +20,8 @@ public:
       std::shared_ptr<bridge::BridgeStateRepository> state_repository,
       std::shared_ptr<obcx::core::BlockingExecutor> blocking_executor);
 
-  auto handle_checkalive_command(obcx::common::MessageEvent event,
-                                 const std::string &telegram_group_id)
+  auto handle_bridge_status_command(obcx::common::MessageEvent event,
+                                    const std::string &telegram_group_id)
       -> boost::asio::awaitable<void>;
 
 private:

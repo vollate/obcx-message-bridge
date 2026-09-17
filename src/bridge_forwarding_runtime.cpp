@@ -454,7 +454,7 @@ auto BridgeForwardingRuntime::handle_command(
   }
 
   if (invocation.source_platform == "telegram") {
-    if (invocation.name != "recall" && invocation.name != "checkalive" &&
+    if (invocation.name != "recall" && invocation.name != "bridge_status" &&
         invocation.name != "poke") {
       co_return false;
     }
@@ -477,8 +477,8 @@ auto BridgeForwardingRuntime::handle_command(
     if (invocation.name == "recall") {
       co_await runtime->second->telegram_handler->handle_recall_command(
           *event, qq_group_id);
-    } else if (invocation.name == "checkalive") {
-      co_await runtime->second->telegram_handler->handle_checkalive_command(
+    } else if (invocation.name == "bridge_status") {
+      co_await runtime->second->telegram_handler->handle_bridge_status_command(
           *event, qq_group_id);
     } else {
       co_await runtime->second->telegram_handler->handle_poke_command(
@@ -487,14 +487,15 @@ auto BridgeForwardingRuntime::handle_command(
     co_return true;
   }
 
-  if (invocation.source_platform == "qq" && invocation.name == "checkalive") {
+  if (invocation.source_platform == "qq" &&
+      invocation.name == "bridge_status") {
     const auto [telegram_group_id, topic_id] =
         pair.tg_group_and_topic_id(*event->group_id);
     (void)topic_id;
     if (telegram_group_id.empty()) {
       co_return false;
     }
-    co_await runtime->second->qq_handler->handle_checkalive_command(
+    co_await runtime->second->qq_handler->handle_bridge_status_command(
         *event, telegram_group_id);
     co_return true;
   }

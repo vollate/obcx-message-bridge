@@ -7,7 +7,7 @@
 #include "media_processor.hpp"
 
 #include <algorithm>
-#include <boost/asio/io_context.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <common/logger.hpp>
 #include <fmt/format.h>
 #include <iomanip>
@@ -264,10 +264,10 @@ auto QQMediaProcessor::detect_gif_format(const std::string &url)
     OBCX_DEBUG("[图片类型检测] 创建专用QQ文件下载HttpClient - 主机: {}:{}",
                host, qq_config.port);
 
-    boost::asio::io_context temp_ioc;
+    const auto executor = co_await boost::asio::this_coro::executor;
 
     auto qq_http_client =
-        std::make_unique<obcx::network::HttpClient>(temp_ioc, qq_config);
+        std::make_unique<obcx::network::HttpClient>(executor, qq_config);
 
     // Range: 0-31 足以覆盖所有常见图片格式的 magic number。
     std::map<std::string, std::string> headers;
@@ -284,9 +284,9 @@ auto QQMediaProcessor::detect_gif_format(const std::string &url)
             MediaProcessor::detect_mime_type_from_content(file_header);
         bool is_gif = MediaProcessor::is_gif_from_content(file_header);
 
-        OBCX_INFO("[图片类型检测] 文件头部MIME检测成功: {} -> {} "
-                  "(is_gif={}, 读取了{}字节)",
-                  url, detected_mime, is_gif, file_header.size());
+        OBCX_DEBUG("[图片类型检测] 文件头部MIME检测成功: {} -> {} "
+                   "(is_gif={}, 读取了{}字节)",
+                   url, detected_mime, is_gif, file_header.size());
         OBCX_DEBUG("[图片类型检测] 文件头部16进制: {}",
                    to_hex_string(file_header));
 

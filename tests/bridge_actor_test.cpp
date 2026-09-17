@@ -189,7 +189,7 @@ auto command_message(std::string name, std::string platform = "telegram")
               {"sender", "7"},
               {"group_id", "42"},
               {"message_type", "group"},
-              {"payload", {{"raw_message", "/checkalive"}}},
+              {"payload", {{"raw_message", "/bridge_status"}}},
           },
   };
   obcx::core::MessageEnvelope envelope;
@@ -205,6 +205,57 @@ auto command_message(std::string name, std::string platform = "telegram")
       {std::string{obcx::command::generation_header}, "1"},
       {std::string{obcx::command::reply_header}, "coordinator"},
   };
+  return envelope;
+}
+
+auto raw_heartbeat(std::string platform, std::string installation,
+                   std::chrono::system_clock::time_point event_time)
+    -> obcx::core::MessageEnvelope {
+  obcx::core::events::RawHeartbeatEvent heartbeat{
+      .payload = {{"interval_ms", 30000}},
+  };
+  obcx::core::MessageEnvelope envelope;
+  envelope.id = "heartbeat-" + installation;
+  envelope.type =
+      obcx::core::canonical_message_type_name<decltype(heartbeat)>();
+  envelope.source_platform = std::move(platform);
+  envelope.source_bot = std::move(installation);
+  envelope.conversation_id = "global";
+  envelope.timestamp = event_time;
+  envelope.payload = heartbeat;
+  return envelope;
+}
+
+auto raw_message_activity(std::string platform, std::string installation,
+                          std::chrono::system_clock::time_point event_time)
+    -> obcx::core::MessageEnvelope {
+  obcx::core::events::RawMessageEvent event{
+      .payload = {{"message_id", "activity"}},
+  };
+  obcx::core::MessageEnvelope envelope;
+  envelope.id = "message-" + installation;
+  envelope.type = obcx::core::canonical_message_type_name<decltype(event)>();
+  envelope.source_platform = std::move(platform);
+  envelope.source_bot = std::move(installation);
+  envelope.conversation_id = "group:42";
+  envelope.timestamp = event_time;
+  envelope.payload = event;
+  return envelope;
+}
+
+auto message_sent_activity(std::string platform, std::string installation,
+                           std::string action) -> obcx::core::MessageEnvelope {
+  obcx::core::events::BotMessageSentEvent event{
+      .payload = {{"action", std::move(action)}},
+  };
+  obcx::core::MessageEnvelope envelope;
+  envelope.id = "message-sent-" + installation;
+  envelope.type = obcx::core::canonical_message_type_name<decltype(event)>();
+  envelope.source_platform = std::move(platform);
+  envelope.source_bot = std::move(installation);
+  envelope.conversation_id = "global";
+  envelope.timestamp = std::chrono::system_clock::now();
+  envelope.payload = event;
   return envelope;
 }
 
@@ -425,7 +476,7 @@ TEST(BridgeActorTest, DeclaresTypedCommandsWithoutHandlerMetadata) {
       obcx::common::json::parse(bridge::BridgeActor::input_contract_json());
   ASSERT_TRUE(contract.contains("commands"));
   ASSERT_EQ(contract["commands"].size(), 3U);
-  EXPECT_EQ(contract["commands"][0]["name"], "checkalive");
+  EXPECT_EQ(contract["commands"][0]["name"], "bridge_status");
   EXPECT_EQ(contract["commands"][1]["name"], "poke");
   EXPECT_EQ(contract["commands"][2]["name"], "recall");
   EXPECT_FALSE(contract["commands"][0].contains("handler"));
@@ -466,11 +517,11 @@ TEST(BridgeActorTest, HandlesTypedCommandAndReturnsContinueCompletion) {
 
   const auto result = run_actor(
       services,
-      command_message<bridge::commands::CheckAliveCommand>("checkalive"));
+      command_message<bridge::commands::BridgeStatusCommand>("bridge_status"));
 
   ASSERT_TRUE(result.ok());
   ASSERT_EQ(forwarder->seen_commands.size(), 1U);
-  EXPECT_EQ(forwarder->seen_commands.front().name, "checkalive");
+  EXPECT_EQ(forwarder->seen_commands.front().name, "bridge_status");
   ASSERT_EQ(result.emitted.size(), 1U);
   EXPECT_EQ(result.emitted.front().type,
             obcx::core::canonical_message_type_name<
@@ -494,10 +545,10 @@ TEST(BridgeActorTest, HandlesEveryConfiguredPlatformCommandAsTypedMessage) {
   EXPECT_TRUE(run_actor(services,
                         command_message<bridge::commands::PokeCommand>("poke"))
                   .ok());
-  EXPECT_TRUE(
-      run_actor(services, command_message<bridge::commands::CheckAliveCommand>(
-                              "checkalive", "qq"))
-          .ok());
+  EXPECT_TRUE(run_actor(services,
+                        command_message<bridge::commands::BridgeStatusCommand>(
+                            "bridge_status", "qq"))
+                  .ok());
 
   ASSERT_EQ(forwarder->seen_commands.size(), 3U);
   EXPECT_EQ(forwarder->seen_commands[0].source_platform, "telegram");
@@ -505,7 +556,91 @@ TEST(BridgeActorTest, HandlesEveryConfiguredPlatformCommandAsTypedMessage) {
   EXPECT_EQ(forwarder->seen_commands[1].source_platform, "telegram");
   EXPECT_EQ(forwarder->seen_commands[1].name, "poke");
   EXPECT_EQ(forwarder->seen_commands[2].source_platform, "qq");
-  EXPECT_EQ(forwarder->seen_commands[2].name, "checkalive");
+  EXPECT_EQ(forwarder->seen_commands[2].name, "bridge_status");
+}
+
+TEST(BridgeActorTest, PersistsNativeHeartbeatAtLocalObservationTime) {
+  const auto db_path = temp_db_path("heartbeat");
+  auto db_manager = std::make_shared<obcx::core::DbManager>();
+  db_manager->configure({sqlite_config(db_path)});
+  auto repository = std::make_shared<bridge::BridgeStateRepository>(
+      *db_manager, "main", "bridge");
+  repository->initialize_schema();
+  auto services = std::make_shared<obcx::core::ActorServices>();
+  services->register_service<bridge::BridgeStateRepository>(repository);
+  const auto old_event_time =
+      std::chrono::system_clock::time_point{std::chrono::milliseconds{1}};
+  const auto before = std::chrono::system_clock::time_point{
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())};
+
+  const auto result =
+      run_actor(services, raw_heartbeat("qq", "qq-main", old_event_time));
+  const auto after = std::chrono::system_clock::now();
+
+  ASSERT_TRUE(result.ok());
+  const auto activity = repository->get_platform_heartbeat("qq-main");
+  ASSERT_TRUE(activity.has_value());
+  EXPECT_EQ(activity->platform, "qq");
+  EXPECT_GE(activity->last_heartbeat_at, before);
+  EXPECT_LE(activity->last_heartbeat_at, after);
+  std::filesystem::remove(db_path);
+}
+
+TEST(BridgeActorTest, PersistsTelegramMessageAtLocalObservationTime) {
+  const auto db_path = temp_db_path("message-activity");
+  auto db_manager = std::make_shared<obcx::core::DbManager>();
+  db_manager->configure({sqlite_config(db_path)});
+  auto repository = std::make_shared<bridge::BridgeStateRepository>(
+      *db_manager, "main", "bridge");
+  repository->initialize_schema();
+  auto services = std::make_shared<obcx::core::ActorServices>();
+  services->register_service<bridge::BridgeStateRepository>(repository);
+  const auto old_event_time =
+      std::chrono::system_clock::time_point{std::chrono::milliseconds{1}};
+  const auto before = std::chrono::system_clock::time_point{
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())};
+
+  const auto result =
+      run_actor(services, raw_message_activity("telegram", "telegram-main",
+                                               old_event_time));
+  const auto after = std::chrono::system_clock::now();
+
+  ASSERT_TRUE(result.ok());
+  const auto activity = repository->get_platform_heartbeat("telegram-main");
+  ASSERT_TRUE(activity.has_value());
+  EXPECT_EQ(activity->platform, "telegram");
+  EXPECT_GE(activity->last_heartbeat_at, before);
+  EXPECT_LE(activity->last_heartbeat_at, after);
+  std::filesystem::remove(db_path);
+}
+
+TEST(BridgeActorTest, PersistsSuccessfulTelegramSendActivity) {
+  const auto db_path = temp_db_path("message-sent-activity");
+  auto db_manager = std::make_shared<obcx::core::DbManager>();
+  db_manager->configure({sqlite_config(db_path)});
+  auto repository = std::make_shared<bridge::BridgeStateRepository>(
+      *db_manager, "main", "bridge");
+  repository->initialize_schema();
+  auto services = std::make_shared<obcx::core::ActorServices>();
+  services->register_service<bridge::BridgeStateRepository>(repository);
+  const auto before = std::chrono::system_clock::time_point{
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())};
+
+  const auto result =
+      run_actor(services, message_sent_activity("telegram", "telegram-main",
+                                                "message.send_group"));
+  const auto after = std::chrono::system_clock::now();
+
+  ASSERT_TRUE(result.ok());
+  const auto activity = repository->get_platform_heartbeat("telegram-main");
+  ASSERT_TRUE(activity.has_value());
+  EXPECT_EQ(activity->platform, "telegram");
+  EXPECT_GE(activity->last_heartbeat_at, before);
+  EXPECT_LE(activity->last_heartbeat_at, after);
+  std::filesystem::remove(db_path);
 }
 
 TEST(BridgeActorTest, RoutesTypedNoticeThroughActorForwarder) {

@@ -7,6 +7,7 @@ add_library(
 	  bridge_hash.cpp
 	  bridge_message_event_adapter.cpp
   bridge_state_repository.cpp
+  bridge_status.cpp
   received_message_repository.cpp
   media_converter.cpp
   media_processor.cpp

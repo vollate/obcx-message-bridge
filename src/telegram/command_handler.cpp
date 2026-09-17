@@ -1,10 +1,10 @@
 #include "telegram/command_handler.hpp"
 
 #include "bridge_state_repository.hpp"
+#include "bridge_status.hpp"
 #include "received_message_repository.hpp"
 
 #include <common/logger.hpp>
-#include <fmt/format.h>
 
 #include <chrono>
 #include <optional>
@@ -133,53 +133,39 @@ auto TelegramCommandHandler::send_reply_message(
   (void)co_await operations_->send_telegram_group(telegram_group_id, message);
 }
 
-auto TelegramCommandHandler::handle_checkalive_command(
+auto TelegramCommandHandler::handle_bridge_status_command(
     obcx::common::MessageEvent event, const std::string_view qq_group_id)
     -> boost::asio::awaitable<void> {
   (void)qq_group_id;
   try {
     const auto telegram_group_id = event.group_id.value();
-    std::optional<storage::PlatformHeartbeatInfo> qq_heartbeat;
-    std::optional<storage::PlatformHeartbeatInfo> telegram_heartbeat;
+    const auto now = std::chrono::system_clock::now();
+    const auto telegram_installation =
+        operations_->telegram_installation().installation_id;
+    const auto onebot_installation =
+        operations_->onebot11_installation().installation_id;
+
+    std::optional<storage::PlatformHeartbeatInfo> qq_activity;
+    std::optional<storage::PlatformHeartbeatInfo> telegram_activity;
     if (state_repository_) {
-      const auto telegram_installation =
-          operations_->telegram_installation().installation_id;
-      const auto onebot_installation =
-          operations_->onebot11_installation().installation_id;
-      std::tie(qq_heartbeat, telegram_heartbeat) =
+      std::tie(qq_activity, telegram_activity) =
           co_await blocking_executor_->run([repository = state_repository_,
                                             telegram_installation,
-                                            onebot_installation] {
+                                            onebot_installation, now] {
+            (void)repository->update_platform_heartbeat(telegram_installation,
+                                                        "telegram", now);
             return std::pair{
                 repository->get_platform_heartbeat(onebot_installation),
                 repository->get_platform_heartbeat(telegram_installation)};
           });
     }
 
-    const auto now = std::chrono::system_clock::now();
-    std::string response;
-    if (qq_heartbeat.has_value()) {
-      const auto age = std::chrono::duration_cast<std::chrono::seconds>(
-                           now - qq_heartbeat->last_heartbeat_at)
-                           .count();
-      response += fmt::format("🤖 QQ平台状态:\n最后心跳: {} 秒前\n{}\n", age,
-                              age > 60 ? "⚠️ QQ平台可能离线" : "✅ QQ平台正常");
-    } else {
-      response += "🤖 QQ平台状态: ❌ 无心跳记录\n";
-    }
-    if (telegram_heartbeat.has_value()) {
-      const auto age = std::chrono::duration_cast<std::chrono::seconds>(
-                           now - telegram_heartbeat->last_heartbeat_at)
-                           .count();
-      response += fmt::format(
-          "\n💬 Telegram平台状态:\n最后活动: {} 秒前\n{}", age,
-          age > 40 ? "⚠️ Telegram平台可能离线" : "✅ Telegram平台正常");
-    } else {
-      response += "\n💬 Telegram平台状态: ❌ 无活动记录";
-    }
+    const auto response =
+        render_bridge_status(onebot_installation, qq_activity,
+                             telegram_installation, telegram_activity, now);
     co_await send_reply_message(telegram_group_id, event.message_id, response);
   } catch (const std::exception &error) {
-    OBCX_ERROR("处理 /checkalive 命令时出错: {}", error.what());
+    OBCX_ERROR("处理 /bridge_status 命令时出错: {}", error.what());
   }
 }
 

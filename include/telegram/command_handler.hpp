@@ -28,8 +28,8 @@ public:
   auto handle_recall_command(obcx::common::MessageEvent event,
                              std::string_view qq_group_id)
       -> boost::asio::awaitable<void>;
-  auto handle_checkalive_command(obcx::common::MessageEvent event,
-                                 std::string_view qq_group_id)
+  auto handle_bridge_status_command(obcx::common::MessageEvent event,
+                                    std::string_view qq_group_id)
       -> boost::asio::awaitable<void>;
   auto handle_poke_command(obcx::common::MessageEvent event,
                            std::string_view qq_group_id)

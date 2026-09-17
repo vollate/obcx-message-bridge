@@ -190,6 +190,39 @@ protected:
   asio::io_context ioc_;
 };
 
+TEST_F(ImageUrlValidatorTest, ProbeCompletesAndDrainsOnCallerExecutor) {
+  server_.set("/probe", png_body(128));
+  config_.image_url_probe_max_attempts = 1;
+  config_.image_url_probe_base_delay_ms = 1;
+  config_.image_placeholder_url = "https://placeholder.invalid/image.png";
+
+  const auto results = run_awaitable(
+      ioc_,
+      ImageUrlValidator::validate(config_, {{"photo", server_.url("/probe")}}));
+
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_EQ(results[0].status, ImageUrlStatus::Reachable);
+  EXPECT_EQ(results[0].effective_url, server_.url("/probe"));
+  EXPECT_EQ(server_.max_active(), 1);
+}
+
+TEST_F(ImageUrlValidatorTest, ProbeTimeoutCompletesAndDrainsOnCallerExecutor) {
+  server_.set("/probe-timeout", png_body(128), false, 500ms);
+  config_.image_url_probe_timeout_ms = 30;
+  config_.image_url_probe_max_attempts = 1;
+  config_.image_url_probe_base_delay_ms = 1;
+  config_.image_placeholder_url = "https://placeholder.invalid/image.png";
+
+  const auto results = run_awaitable(
+      ioc_, ImageUrlValidator::validate(
+                config_, {{"photo", server_.url("/probe-timeout")}}));
+
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_EQ(results[0].status, ImageUrlStatus::Replaced);
+  EXPECT_EQ(results[0].effective_url, config_.image_placeholder_url);
+  EXPECT_FALSE(results[0].failure_reason.empty());
+}
+
 TEST_F(ImageUrlValidatorTest, DownloadsImageBetweenEightAndTenMiB) {
   constexpr std::size_t kNineMiB = 9U * 1024U * 1024U;
   server_.set("/large", png_body(kNineMiB));

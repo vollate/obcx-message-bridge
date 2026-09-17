@@ -412,17 +412,19 @@ TEST(BridgeCommandOperationTest, AmbiguousRecallPerformsNoProviderCall) {
   std::filesystem::remove(db_path);
 }
 
-TEST(BridgeCommandOperationTest, CheckaliveRepliesThroughTypedGroupSends) {
-  const auto db_path = temp_db_path("checkalive");
+TEST(BridgeCommandOperationTest,
+     BridgeStatusReportsBothPlatformsAndRefreshesCommandSourceActivity) {
+  const auto db_path = temp_db_path("bridge-status");
   auto db = std::make_shared<obcx::core::DbManager>();
   db->configure({sqlite_config(db_path)});
   auto repository =
       std::make_shared<bridge::BridgeStateRepository>(*db, "main", "bridge");
   repository->initialize_schema();
-  const auto now = std::chrono::system_clock::now();
-  ASSERT_TRUE(repository->update_platform_heartbeat("qq-main", "qq", now));
+  const auto stale =
+      std::chrono::system_clock::now() - std::chrono::minutes{10};
+  ASSERT_TRUE(repository->update_platform_heartbeat("qq-main", "qq", stale));
   ASSERT_TRUE(
-      repository->update_platform_heartbeat("tg-main", "telegram", now));
+      repository->update_platform_heartbeat("tg-main", "telegram", stale));
   auto client = std::make_shared<RecordingOperationClient>();
   auto operations = std::make_shared<bridge::BridgeBotOperations>(
       client, "tg-main", "qq-main");
@@ -433,22 +435,40 @@ TEST(BridgeCommandOperationTest, CheckaliveRepliesThroughTypedGroupSends) {
   obcx::common::MessageEvent telegram_event;
   telegram_event.group_id = "tg-group";
   telegram_event.message_id = "tg-command";
-  run(telegram_handler.handle_checkalive_command(std::move(telegram_event),
-                                                 "qq-group"));
+  run(telegram_handler.handle_bridge_status_command(std::move(telegram_event),
+                                                    "qq-group"));
 
   bridge::qq::QQCommandHandler qq_handler(operations, repository, blocking);
   obcx::common::MessageEvent qq_event;
   qq_event.group_id = "qq-group";
   qq_event.message_id = "qq-command";
-  run(qq_handler.handle_checkalive_command(std::move(qq_event), "tg-group"));
+  run(qq_handler.handle_bridge_status_command(std::move(qq_event), "tg-group"));
 
   ASSERT_EQ(client->sends.size(), 2U);
   EXPECT_EQ(client->sends[0].target.installation.surface,
             obcx::bot::SurfaceId{"telegram.bot_api"});
   EXPECT_EQ(client->sends[1].target.installation.surface,
             obcx::bot::SurfaceId{"onebot11.qq"});
-  EXPECT_NE(text_from(client->sends[0].message).find("QQ平台状态"),
+
+  const auto telegram_response = text_from(client->sends[0].message);
+  EXPECT_NE(
+      telegram_response.find("🤖 QQ 平台\n安装: qq-main\n状态: ⚠️ 可能离线"),
+      std::string::npos);
+  EXPECT_NE(
+      telegram_response.find("💬 Telegram 平台\n安装: tg-main\n状态: ✅ 正常"),
+      std::string::npos);
+
+  const auto qq_response = text_from(client->sends[1].message);
+  EXPECT_NE(qq_response.find("🤖 QQ 平台\n安装: qq-main\n状态: ✅ 正常"),
             std::string::npos);
+  EXPECT_NE(qq_response.find("💬 Telegram 平台\n安装: tg-main\n状态: ✅ 正常"),
+            std::string::npos);
+  const auto qq_activity = repository->get_platform_heartbeat("qq-main");
+  const auto telegram_activity = repository->get_platform_heartbeat("tg-main");
+  ASSERT_TRUE(qq_activity.has_value());
+  ASSERT_TRUE(telegram_activity.has_value());
+  EXPECT_GT(qq_activity->last_heartbeat_at, stale);
+  EXPECT_GT(telegram_activity->last_heartbeat_at, stale);
 
   blocking->shutdown();
   std::filesystem::remove(db_path);

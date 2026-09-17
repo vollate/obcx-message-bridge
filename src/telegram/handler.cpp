@@ -131,16 +131,6 @@ auto TelegramHandler::forward_to_qq(obcx::common::MessageEvent event)
   const auto target_installation =
       operations_->onebot11_installation().installation_id;
 
-  // 更新Telegram平台心跳时间
-  if (state_repository_) {
-    const auto now = std::chrono::system_clock::now();
-    (void)co_await blocking_executor_->run(
-        [repository = state_repository_, source_installation, now] {
-          return repository->update_platform_heartbeat(source_installation,
-                                                       "telegram", now);
-        });
-  }
-
   if (event.message_type != "group" || !event.group_id.has_value()) {
     co_return outcome;
   }
@@ -452,17 +442,6 @@ auto TelegramHandler::handle_message_deleted(obcx::common::Event event)
 
 auto TelegramHandler::handle_message_edited(obcx::common::MessageEvent event)
     -> boost::asio::awaitable<DirectForwardOutcome> {
-  if (state_repository_) {
-    const auto now = std::chrono::system_clock::now();
-    const auto installation =
-        operations_->telegram_installation().installation_id;
-    (void)co_await blocking_executor_->run(
-        [repository = state_repository_, installation, now] {
-          return repository->update_platform_heartbeat(installation, "telegram",
-                                                       now);
-        });
-  }
-
   co_return co_await event_handler_->handle_message_edited(std::move(event));
 }
 
@@ -473,11 +452,11 @@ auto TelegramHandler::handle_recall_command(obcx::common::MessageEvent event,
                                                    qq_group_id);
 }
 
-auto TelegramHandler::handle_checkalive_command(
+auto TelegramHandler::handle_bridge_status_command(
     obcx::common::MessageEvent event, std::string_view qq_group_id)
     -> boost::asio::awaitable<void> {
-  co_await command_handler_->handle_checkalive_command(std::move(event),
-                                                       qq_group_id);
+  co_await command_handler_->handle_bridge_status_command(std::move(event),
+                                                          qq_group_id);
 }
 
 auto TelegramHandler::handle_poke_command(obcx::common::MessageEvent event,
@@ -508,15 +487,6 @@ auto TelegramHandler::forward_media_group_to_qq(
       operations_->telegram_installation().installation_id;
   const auto target_installation =
       operations_->onebot11_installation().installation_id;
-
-  if (state_repository_) {
-    const auto now = std::chrono::system_clock::now();
-    (void)co_await blocking_executor_->run(
-        [repository = state_repository_, source_installation, now] {
-          return repository->update_platform_heartbeat(source_installation,
-                                                       "telegram", now);
-        });
-  }
 
   if (primary.message_type != "group" || !primary.group_id.has_value()) {
     co_return;

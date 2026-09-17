@@ -11,7 +11,7 @@ failed attempts emit `bridge::events::MessageForwarded` and
 
 - Canonical metadata: `actor.toml`
 - Actor id: `vollate.bridge`
-- Actor name and version: `bridge` `0.1.0`
+- Actor name and version: `bridge` `0.2.0`
 - ABI: `2`
 - CMake target and artifact: `bridge_actor`, `bridge.so`
 - Platforms: Linux x86_64 and arm64
@@ -106,15 +106,29 @@ The supported pipeline is:
 RawMessageEvent -> command coordinator -> typed bridge command -> Continue
 obcx::core::events::RawMessageEvent -> message_store ->
 obcx::message_store::events::MessageStored -> bridge
+obcx::core::events::RawHeartbeatEvent -> bridge
+obcx::core::events::BotMessageSentEvent -> bridge
 obcx::core::events::RawNoticeEvent -> bridge
 ```
 
-The actor declares typed observations for Telegram `recall`, `checkalive`, and
-`poke`, plus QQ `checkalive`. Activate them explicitly with
+The actor declares typed observations for Telegram `recall`, `bridge_status`,
+and `poke`, plus QQ `bridge_status`. Activate them explicitly with
 `[[command_runtime.routes]]`, as shown in
-[`actor-config.example.toml`](actor-config.example.toml). Platform parsing and
-Telegram menu replacement belong to the runtime adapter. Only an active
-`command_runtime.routes` match intercepts slash-prefixed traffic. If a message
+[`actor-config.example.toml`](actor-config.example.toml). `/bridge_status`
+reports both installation identities, their most recent activity, and a
+consistent freshness status on either platform. QQ activity older than 60
+seconds and Telegram activity older than 300 seconds is reported as potentially
+offline. The explicit `command_runtime.message_observers` entry invokes Bridge
+with every received Telegram `RawMessageEvent` before command routing, so
+commands such as `/help`, consumed commands, and denied commands all count as
+activity without fabricating a Telegram heartbeat. A successful Telegram
+message-send operation emits `BotMessageSentEvent` and also refreshes Telegram
+activity; failed sends and non-message operations do not. Native OneBot
+heartbeat events refresh QQ even while its chats are idle. Receiving
+`/bridge_status` and ordinary forwarded messages also refreshes their source
+platform. Platform parsing and Telegram menu replacement belong to the runtime
+adapter. Only an
+active `command_runtime.routes` match intercepts slash-prefixed traffic. If a message
 such as `/tp 2072 ~ 1080` has no scoped route, the command coordinator submits
 the original event to the ordinary message-store and bridge pipeline; bridge
 handlers do not reclassify it from its leading `/`.
@@ -124,6 +138,13 @@ allowing message-store to persist the source event; the inherited
 `obcx.command.processed` header makes the later `MessageStored` bridge stage a
 no-op so the command is neither executed nor forwarded twice. A command actor
 that returns `Consume` prevents the ordinary pipeline from running at all.
+
+QQ activity uses the `pipelines.heartbeat` stage shown in the example. The
+runtime converts native OneBot heartbeat events into
+`obcx::core::events::RawHeartbeatEvent`. Telegram has no synthetic heartbeat:
+the pre-command message observer passes the original `RawMessageEvent` to
+Bridge, while successful outbound sends use the `pipelines.message_sent` stage.
+All paths persist the installation-scoped local observation time.
 
 QQ notices use a separate actor pipeline. The installation event-ingress
 component converts provider events into runtime `NoticeEvent` values, and the

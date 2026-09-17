@@ -124,19 +124,43 @@ entries = []
 mode = "unrestricted"
 entries = []
 
+[[command_runtime.message_observers]]
+actor = "bridge"
+platforms = ["telegram"]
+bots = ["telegram_bot"]
+timeout_ms = 5000
+
 [[command_runtime.routes]]
 actor = "bridge"
-commands = ["recall", "checkalive", "poke"]
+commands = ["recall", "bridge_status", "poke"]
 platforms = ["telegram"]
 bots = ["telegram_bot"]
 fallback = "continue"
 
 [[command_runtime.routes]]
 actor = "bridge"
-commands = ["checkalive"]
+commands = ["bridge_status"]
 platforms = ["qq"]
 bots = ["qq_bot"]
 fallback = "continue"
+
+[pipelines.heartbeat]
+source = "obcx::core::events::RawHeartbeatEvent"
+
+[[pipelines.heartbeat.stages]]
+name = "observe"
+actor = "bridge"
+input = "obcx::core::events::RawHeartbeatEvent"
+mode = "await"
+
+[pipelines.message_sent]
+source = "obcx::core::events::BotMessageSentEvent"
+
+[[pipelines.message_sent.stages]]
+name = "observe"
+actor = "bridge"
+input = "obcx::core::events::BotMessageSentEvent"
+mode = "await"
 
 [pipelines.notice]
 source = "obcx::core::events::RawNoticeEvent"

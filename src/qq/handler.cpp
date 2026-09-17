@@ -49,13 +49,22 @@ QQHandler::~QQHandler() = default;
 auto QQHandler::forward_to_telegram(obcx::common::MessageEvent event)
     -> boost::asio::awaitable<DirectForwardOutcome> {
   DirectForwardOutcome outcome;
+  const auto source_installation =
+      operations_->onebot11_installation().installation_id;
+  if (state_repository_) {
+    const auto now = std::chrono::system_clock::now();
+    (void)co_await blocking_executor_->run(
+        [repository = state_repository_, source_installation, now] {
+          return repository->update_platform_heartbeat(source_installation,
+                                                       "qq", now);
+        });
+  }
+
   if (event.message_type != "group" || !event.group_id.has_value()) {
     co_return outcome;
   }
 
   const std::string qq_group_id = event.group_id.value();
-  const auto source_installation =
-      operations_->onebot11_installation().installation_id;
   const auto target_installation =
       operations_->telegram_installation().installation_id;
   std::string telegram_group_id;
@@ -357,11 +366,11 @@ auto QQHandler::handle_recall_event(obcx::common::Event event)
   co_await event_handler_->handle_recall_event(std::move(event));
 }
 
-auto QQHandler::handle_checkalive_command(obcx::common::MessageEvent event,
-                                          const std::string &telegram_group_id)
+auto QQHandler::handle_bridge_status_command(
+    obcx::common::MessageEvent event, const std::string &telegram_group_id)
     -> boost::asio::awaitable<void> {
-  co_await command_handler_->handle_checkalive_command(std::move(event),
-                                                       telegram_group_id);
+  co_await command_handler_->handle_bridge_status_command(std::move(event),
+                                                          telegram_group_id);
 }
 
 auto QQHandler::handle_poke_event(const obcx::common::NoticeEvent &event)

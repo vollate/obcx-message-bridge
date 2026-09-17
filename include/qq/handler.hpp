@@ -39,8 +39,8 @@ public:
       -> boost::asio::awaitable<DirectForwardOutcome>;
   auto handle_recall_event(obcx::common::Event event)
       -> boost::asio::awaitable<void>;
-  auto handle_checkalive_command(obcx::common::MessageEvent event,
-                                 const std::string &telegram_group_id)
+  auto handle_bridge_status_command(obcx::common::MessageEvent event,
+                                    const std::string &telegram_group_id)
       -> boost::asio::awaitable<void>;
   auto handle_poke_event(const obcx::common::NoticeEvent &event)
       -> boost::asio::awaitable<void>;

@@ -9,7 +9,6 @@
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
-#include <boost/asio/io_context.hpp>
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
@@ -103,7 +102,7 @@ auto parse_url(const std::string &url) -> ParsedUrl {
 // QQ 图片下载不应走 Telegram 代理。
 auto probe_once(const ParsedUrl &url, std::chrono::milliseconds timeout)
     -> asio::awaitable<bool> {
-  asio::io_context temp_ioc;
+  const auto executor = co_await asio::this_coro::executor;
 
   obcx::common::ConnectionConfig cfg;
   cfg.host = url.host;
@@ -116,7 +115,7 @@ auto probe_once(const ParsedUrl &url, std::chrono::milliseconds timeout)
   cfg.proxy_username.clear();
   cfg.proxy_password.clear();
 
-  auto client = std::make_unique<obcx::network::HttpClient>(temp_ioc, cfg);
+  auto client = std::make_unique<obcx::network::HttpClient>(executor, cfg);
   client->set_timeout(timeout);
 
   std::map<std::string, std::string> headers;
@@ -151,7 +150,7 @@ auto extension_for_mime(std::string_view mime) -> std::string_view {
 auto download_once(const ParsedUrl &url, std::chrono::milliseconds timeout,
                    std::size_t body_limit)
     -> asio::awaitable<std::pair<std::string, std::string>> {
-  asio::io_context temp_ioc;
+  const auto executor = co_await asio::this_coro::executor;
 
   obcx::common::ConnectionConfig cfg;
   cfg.host = url.host;
@@ -164,7 +163,7 @@ auto download_once(const ParsedUrl &url, std::chrono::milliseconds timeout,
   cfg.proxy_username.clear();
   cfg.proxy_password.clear();
 
-  auto client = std::make_unique<obcx::network::HttpClient>(temp_ioc, cfg);
+  auto client = std::make_unique<obcx::network::HttpClient>(executor, cfg);
   client->set_timeout(timeout);
   client->set_response_body_limit(body_limit);
 
