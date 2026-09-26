@@ -1,219 +1,408 @@
-# OBCX Bridge Plugin
+# OBCX Message Bridge
 
-QQ 与 Telegram 双向消息桥接插件，基于 [OBCX](https://github.com/Onebot-CXX/obcx) 框架。
+`obcx-message-bridge` is the native ABI 2 actor that forwards stored messages
+between QQ and Telegram. It consumes
+`obcx::message_store::events::MessageStored` through generated reflected
+dispatch and performs bot I/O with `ActorContext::await_asio`. Successful and
+failed attempts emit `bridge::events::MessageForwarded` and
+`bridge::events::MessageForwardFailed`, respectively.
 
-## 功能
+## Package Contract
 
-- **双向消息转发**：QQ 群 <-> Telegram 群/Topic
-- **跨平台回复**：回复消息自动映射到对应平台的原始消息
-- **媒体文件转发**：图片、视频、音频、文档、贴纸、GIF 动画
-- **贴纸转换**：Telegram WebM/TGS 贴纸自动转换为 GIF，支持多级压缩和文件大小限制
-- **消息重试队列**：发送失败的消息自动重试，指数退避
-- **两种桥接模式**：
-  - `group_to_group` — QQ 群对应一个 Telegram 群
-  - `topic_to_group` — QQ 群对应一个 Telegram Topic
+- Canonical metadata: v2 `package.toml`
+- Actor id: `vollate.bridge`
+- Actor name and version: `bridge` `0.2.0`
+- ABI: `2`
+- CMake target and artifact: `bridge_actor`, `bridge.so`
+- Platforms: Linux x86_64 and arm64
+- Runtime dependency: `onebot-cxx.message-store >=0.1.0,<1.0.0`
 
-## 依赖
+`OBCX_ACTOR_EXPORT_V2` exports the numeric ABI generation, factory,
+destructor, actor name, actor version, and generated schema-2 input contract.
+OBCX validates that contract before constructing the actor.
 
-- OBCX 框架（obcx_core）
-- SQLite3
-- toml++
-- ffmpeg（运行时，用于 WebM -> GIF 转换）
-- lottie_convert.py（可选，用于 TGS -> GIF 转换）
+## Build Against An Installed SDK
 
-## 编译
+The supported baseline is Linux x86_64/arm64, CMake 3.30+, GCC 16.1+, C++26,
+`-freflection`, and `__cpp_impl_reflection >= 202506L`.
 
-插件作为 OBCX 的本地插件编译：
+Current development uses core's explicit v2 workspace: select `vollate.bridge`,
+bind its declared sources/providers, and prepare the frozen graph before CMake.
+See core's `docs/architecture/package-cmake.md`. The workspace's `tests` profile
+selects Bridge's repository-owned tests; there is no separate test-option default.
 
 ```bash
-# 在 OBCX 根目录
-cmake -B build -GNinja \
-  -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
-cmake --build build
+cmake --build /path/to/OBCX/build --parallel 20
+ctest --test-dir /path/to/OBCX/build --parallel 20 --output-on-failure -L bridge
 ```
 
-编译产物：
-- `build/plugins/qq_to_tg.so` — QQ 到 Telegram 转发插件
-- `build/plugins/tg_to_qq.so` — Telegram 到 QQ 转发插件
+A top-level installed-SDK build requires a prefix, configuration and all six
+`OBCX_PACKAGES_WORKSPACE/LOCK/GRAPH/CACHE/MODE/STATE_DIR` values. It does not
+implicitly discover a source workspace. Expanded standalone conformance and
+release acceptance remain deferred; the existing optional pipeline/reload
+conformance sources are retained, not claimed as newly verified.
 
-## 配置
+The installed package contains:
 
-参考 `example_plug_config.toml`，完整配置说明如下。
+```text
+lib/obcx/actors/bridge.so
+share/obcx/packages/vollate.bridge/package.toml
+```
 
-### Bot 配置
+## Runtime Configuration
+
+Bridge does not resolve a live bot, transport, token, or process capability
+registry. Root bot tables define exact process-owned installations, and Bridge
+uses only the installed `BotOperationGateway` service:
 
 ```toml
 [bots.qq_bot]
-type = "qq"
 enabled = true
-plugins = ["qq_to_tg"]
+surface = "onebot11.qq"
+transport = "websocket"
 
 [bots.qq_bot.connection]
-type = "websocket"
 host = "127.0.0.1"
 port = 3001
 access_token = ""
-use_ssl = false
-connect_timeout = 5000      # TCP 建连超时
-action_timeout = 30000      # OneBot action 响应超时（见"超时字段速查"）
-heartbeat_interval = 5000
+connect_timeout_ms = 5000
+action_timeout_ms = 30000
 
 [bots.telegram_bot]
-type = "telegram"
 enabled = true
-plugins = ["tg_to_qq"]
+surface = "telegram.bot_api"
+transport = "http"
 
 [bots.telegram_bot.connection]
-type = "http"
 host = "api.telegram.org"
 port = 443
-access_token = "YOUR_BOT_TOKEN"
-use_ssl = true
-connect_timeout = 5000      # HTTP 单次请求超时
-poll_timeout = 25000        # 长轮询服务端侧超时
-poll_force_close = 30000    # 长轮询客户端强制关闭（> poll_timeout）
-poll_retry_interval = 3000  # 轮询重试退避
-proxy_host = "127.0.0.1"    # 可选
-proxy_port = 10086           # 可选
-proxy_type = "http"          # 可选
+access_token = "YOUR_TELEGRAM_BOT_TOKEN"
+bot_username = "your_bot_username"
+use_tls = true
+connect_timeout_ms = 5000
+action_timeout_ms = 30000
+poll_timeout_ms = 25000
+poll_force_close_ms = 30000
+poll_retry_interval_ms = 3000
 ```
 
-### 超时字段速查
+Only `onebot11.qq + websocket`, `onebot11.qq + http`, and
+`telegram.bot_api + http` are implemented. Unknown or unsupported combinations
+fail validation; there is no provider or transport fallback.
 
-> 本节说明 bridge 插件实际使用的所有超时配置。框架侧的完整定义请看根目录 `README.md` 的"超时参数"章节。
+The supported pipeline is:
 
-| 字段 | 所在块 | 默认 | 用途 |
-| --- | --- | --- | --- |
-| `connect_timeout` | `[bots.*.connection]` | 5000 ms | TCP / HTTP 单次请求的底层超时 |
-| `action_timeout` | `[bots.qq_bot.connection]` | 30000 ms | OneBot11 WebSocket 等待 action（例如 `send_group_msg`）echo 响应的超时。过短会在 llonebot 首次发送媒体时（通常 8–10 s）触发 retry queue，导致 QQ 群里出现重复消息 |
-| `poll_timeout` | `[bots.telegram_bot.connection]` | 25000 ms | 发给 Telegram `getUpdates` 的服务端长轮询超时 |
-| `poll_force_close` | `[bots.telegram_bot.connection]` | 30000 ms | 客户端强制关闭长轮询连接的安全超时，**必须大于 `poll_timeout`** |
-| `poll_retry_interval` | `[bots.telegram_bot.connection]` | 3000 ms | 轮询失败后的退避间隔 |
-| `heartbeat_interval` | `[bots.*.connection]` | 30000 ms | 心跳间隔 |
+```text
+RawMessageEvent -> command coordinator -> typed bridge command -> Continue
+obcx::core::events::RawMessageEvent -> message_store ->
+obcx::message_store::events::MessageStored -> bridge
+obcx::core::events::RawHeartbeatEvent -> bridge
+obcx::core::events::BotMessageSentEvent -> bridge
+obcx::core::events::RawNoticeEvent -> bridge
+```
 
-#### 插件内部的重试节奏（硬编码，暂不支持 TOML）
+The actor declares typed observations for Telegram `recall`, `bridge_status`,
+and `poke`, plus QQ `bridge_status`. Activate them explicitly with
+`[[command_runtime.routes]]`, as shown in
+[`actor-config.example.toml`](actor-config.example.toml). `/bridge_status`
+reports both installation identities, their most recent activity, and a
+consistent freshness status on either platform. QQ activity older than 60
+seconds and Telegram activity older than 300 seconds is reported as potentially
+offline. The explicit `command_runtime.message_observers` entry invokes Bridge
+with every received Telegram `RawMessageEvent` before command routing, so
+commands such as `/help`, consumed commands, and denied commands all count as
+activity without fabricating a Telegram heartbeat. A successful Telegram
+message-send operation emits `BotMessageSentEvent` and also refreshes Telegram
+activity; failed sends and non-message operations do not. Native OneBot
+heartbeat events refresh QQ even while its chats are idle. Receiving
+`/bridge_status` and ordinary forwarded messages also refreshes their source
+platform. Platform parsing and Telegram menu replacement belong to the runtime
+adapter. Only an
+active `command_runtime.routes` match intercepts slash-prefixed traffic. If a message
+such as `/tp 2072 ~ 1080` has no scoped route, the command coordinator submits
+the original event to the ordinary message-store and bridge pipeline; bridge
+handlers do not reclassify it from its leading `/`.
 
-定义于 `include/retry_queue_manager.hpp`：
+For a matched bridge command, the actor returns `CommandCompleted(Continue)`,
+allowing message-store to persist the source event; the inherited
+`obcx.command.processed` header makes the later `MessageStored` bridge stage a
+no-op so the command is neither executed nor forwarded twice. A command actor
+that returns `Consume` prevents the ordinary pipeline from running at all.
 
-| 常量 | 值 | 含义 |
-| --- | --- | --- |
-| `DEFAULT_MESSAGE_RETRY_INTERVAL_SECONDS` | 2 s | 文本/普通消息首次重试间隔 |
-| `DEFAULT_MEDIA_RETRY_INTERVAL_SECONDS` | 5 s | 媒体消息首次重试间隔 |
-| `MAX_RETRY_INTERVAL_SECONDS` | 300 s | 指数退避上限 |
-| `MESSAGE_RETRY_MAX_ATTEMPTS` | 5 | 文本消息最大重试次数（`config.cpp`） |
-| `MEDIA_RETRY_MAX_ATTEMPTS` | 3 | 媒体消息最大重试次数（`config.cpp`） |
-| `RETRY_QUEUE_CHECK_INTERVAL_SEC` | 10 s | retry queue 扫描节拍 |
+QQ activity uses the `pipelines.heartbeat` stage shown in the example. The
+runtime converts native OneBot heartbeat events into
+`obcx::core::events::RawHeartbeatEvent`. Telegram has no synthetic heartbeat:
+the pre-command message observer passes the original `RawMessageEvent` to
+Bridge, while successful outbound sends use the `pipelines.message_sent` stage.
+All paths persist the installation-scoped local observation time.
 
-退避公式：`next_interval = min(2^retry_count × base, MAX_RETRY_INTERVAL_SECONDS)`。
+QQ notices use a separate actor pipeline. The installation event-ingress
+component converts provider events into runtime `NoticeEvent` values, and the
+runtime then emits `obcx::core::events::RawNoticeEvent`; Bridge consumes that
+typed input for QQ poke and group-recall behavior. Configure the
+`pipelines.notice` stage shown in the example; the actor does not register bot
+callbacks directly.
 
-> **重要**：`action_timeout` 过短会和 retry queue 互相作用放大错误——action 请求超时触发重试，但原请求往往已经在 llonebot 侧成功，出现双发。实测 llonebot 第一次上传某张图/贴纸时的响应延迟约 8 s，因此 `action_timeout` 建议保持在 **15 s 以上**（默认 30 s 是安全值）。
-
-### 插件配置
+The actor uses the core `DbManager` service. `db = "main"` selects the
+configured database instance and `db_namespace = "bridge"` isolates the
+actor-owned schema. Both `bridge_files_dir` and `bridge_files_container_dir`
+are required absolute paths for media processing; neither is inferred. Bridge
+passes these configured roots and the routed OneBot installation identity to
+its declared `obcx.path-mapping` dependency. Mapping does not create a mount or
+transfer a file; Bridge still owns its media files and cleanup.
 
 ```toml
-[plugins.qq_to_tg]
+[db.instances.main]
+type = "sqlite"
+path = "data/obcx.sqlite3"
+
+[actors.bridge]
+library = "bridge"
 enabled = true
-callbacks = ["on_message", "on_notice"]
-priority = 100
+requires = ["message_store"]
+partition = "source_bot:conversation_id"
+db = "main"
+db_namespace = "bridge"
 
-[plugins.qq_to_tg.config]
-database_file = "bridge_bot.db"
+[actors.bridge.config]
+legacy_state_pair = "primary"
+legacy_unresolved_mapping_policy = "fail"
 enable_retry_queue = true
+message_retry_max_attempts = 5
+message_retry_base_interval_sec = 2
+retry_queue_check_interval_sec = 10
+max_retry_interval_sec = 300
+bridge_files_dir = "/tmp/bridge_files"
+bridge_files_container_dir = "/root/llonebot/bridge_files"
+ffmpeg_path = "ffmpeg"
+gif_max_file_size = 0
+gif_max_duration = 5
+gif_max_fps = 0
+gif_max_width = 0
+gif_max_colors = 256
+qq_media_download_max_bytes = 10485760
+image_placeholder_url = "https://placehold.co/512x512/e9ecef/495057/png?text=NOT+FOUND"
 
-[plugins.tg_to_qq]
-enabled = true
-callbacks = ["on_message", "on_notice"]
-priority = 100
+[[actors.bridge.config.installation_pairs]]
+id = "primary"
+telegram_installation = "telegram_bot"
+onebot11_installation = "qq_bot"
 
-[plugins.tg_to_qq.config]
-database_file = "bridge_bot.db"
-enable_retry_queue = true
+# Migration-only route history for a route no longer in group_mappings:
+# [[actors.bridge.config.legacy_mapping_routes]]
+# pair = "primary"
+# telegram_conversation_id = "chat:-1001234567890"
+# telegram_topic_id = -1
+# qq_conversation_id = "group:123456789"
 ```
 
-### GIF 转换配置
+`image_placeholder_url` must be configured as a direct image URL. The example
+uses a PNG that shows `NOT FOUND`; the embedded image is used only if the
+configured URL cannot be downloaded or validated.
 
-在 `[plugins.tg_to_qq.config]` 中配置（所有字段可选）：
+`qq_media_download_max_bytes` bounds each full QQ image downloaded after
+Telegram rejects direct URL delivery. Configure it in the range
+`1..10485760`; 10 MiB is the public Telegram photo limit. A failed, expired,
+invalid, or oversized item is replaced during multipart fallback without
+discarding valid peers in the same media group.
 
-```toml
-[plugins.tg_to_qq.config]
-ffmpeg_path = "ffmpeg"      # ffmpeg 可执行文件路径，默认通过 PATH 查找
-gif_max_file_size = 0        # 最大输出文件大小，单位字节，0 = 不限制（默认 0）
-gif_max_duration = 5         # 最大动画时长，单位秒（默认 5）
-gif_max_fps = 0              # 最大帧率，0 = 不限（默认 0）
-gif_max_width = 0            # 最大宽度，0 = 保持原始分辨率（默认 0）
-gif_max_colors = 256         # 最大调色板颜色数，范围 2-256（默认 256）
+Before multipart upload, the fallback also checks Telegram's photo-dimension
+rules: width plus height must not exceed 10,000 pixels and the larger-to-smaller
+ratio must not exceed 20. Compliant images retain their original bytes.
+Recoverable overlong images are converted through `ffmpeg_path` without
+upscaling or cropping; extreme ratios are padded before bounded downscaling.
+Successful conversions are reported as `已调整` separately from placeholder
+substitutions reported as `已替换`.
+
+Dimension conversion runs on the process blocking executor, one image at a
+time per media batch, with a 15-second per-image deadline. Images declaring
+more than 64 megapixels are not decoded. `invalid_dimensions`,
+`unsafe_dimensions`, and `normalization_failed` replace only the affected item
+with the configured placeholder. Logs may include item indices and dimensions,
+but never signed QQ URLs, complete decoder output, or complete Telegram
+responses.
+
+The forwarding runtime resolves every event by exact `source_bot` and a named,
+disjoint Telegram/OneBot pair. Each installation may belong to only one pair,
+and a source conversation maps to one target rather than fan-out. When more
+than one pair is configured, every `group_mappings` entry must name `pair`.
+Missing routes remain successful no-ops, while unknown source installations
+fail without selecting another account.
+
+Existing single-pair deployments may retain scalar `telegram_installation` and
+`onebot11_installation` fields with pair-less mappings. Do not mix scalar and
+named forms. Command routes must list every source bot whose Bridge commands
+should be active.
+
+### Execution domains and partitions
+
+Configure bridge with `partition = "source_bot:conversation_id"` so equal
+native conversations from different installations have independent mailboxes.
+A suspended
+handler still owns its partition mailbox: later messages for the same
+conversation remain FIFO, while another conversation can use a different actor
+worker.
+
+Bridge resolves the process-owned `obcx::core::BlockingExecutor` from
+`ActorContext`; it never obtains worker capacity from a bot. Repository calls,
+filesystem operations, and media conversion run through
+`BlockingExecutor::run()` inside the actor-tracked Asio graph. Bot sends,
+downloads, timers, and other asynchronous transport operations remain on their
+Asio executor. Do not add `std::async`, detached threads, or actor-local thread
+pools for synchronous work.
+
+`ffmpeg_path` may be an absolute executable path; the explicit value `ffmpeg`
+uses the process `PATH`. Configure root `action_timeout_ms` above the upstream
+first-media-send latency. Telegram `poll_force_close_ms` must be at least
+`poll_timeout_ms`.
+
+### Conversation-scoped schema migration
+
+Bridge-owned state uses schema version 3. Every live message identity is
+`(installation, platform, conversation_id, message_id)`: QQ groups use
+`group:<id>`, Telegram chats use `chat:<id>`, and Telegram topic id remains
+separate route metadata. Mappings, retry rows, and media-group rows include both
+source and target conversations; installation-scoped user/sticker caches and
+heartbeats retain their version-2 shape. Equal Telegram message ids in two
+chats are valid and MUST NOT be deduplicated or deleted as duplicates.
+
+An unversioned database is first assigned to its deterministic legacy pair as
+version 1 -> 2. Version 2 -> 3 then classifies each mapping from its exact
+Message Store source identity and a current route or migration-only
+`legacy_mapping_routes` entry. Telegram thread metadata selects an exact
+topic-to-group route when configured; a chat-wide group-to-group route applies
+to every forum thread in that chat and therefore does not require a synthetic
+topic-history entry. Configure
+`legacy_unresolved_mapping_policy = "fail"` to roll back the complete
+transaction when a source conversation, historical target route, or album
+primary cannot be proven. `"archive"` is an explicit operator choice:
+unresolved mapping/media
+rows are retained in namespaced version-2 archive tables, but forwarding,
+de-duplication, replies, edits, recalls, commands, and retries never query
+those tables. Pending retries cannot be archived or retargeted and block
+migration until safely drained or explicitly removed after backup.
+
+Stop OBCX and take a SQLite-consistent backup before upgrading; do not copy only
+the main `.db` file while WAL writes are active. Migration and all row/count,
+shape, primary, and index checks run under one transaction during typed actor
+generation preparation, before scheduler or pipeline ingress can invoke
+Bridge. A failed preparation rejects the generation and never publishes an
+uninitialized repository. A reload candidate performs a read-only version-3
+shape check and cannot perform version 1 -> 2 or version 2 -> 3 migration.
+Version 3 is not readable by the preceding binary, so rollback requires
+restoring both that binary and the pre-migration database snapshot; there is no
+down-migration.
+
+With OBCX stopped, create and verify the snapshot with SQLite itself, for
+example:
+
+```bash
+sqlite3 bridge_bot.db ".timeout 10000" ".backup 'bridge_bot.pre-v3.db'"
+sqlite3 bridge_bot.pre-v3.db "PRAGMA integrity_check;"
 ```
 
-转换时使用多级回退策略，逐步增加压缩力度直到输出文件符合大小限制：
+After startup, verify `SELECT MAX(version) FROM bridge_schema_version;` returns
+`3`, inspect the logged live/archive counts, and confirm known equal ids are
+separate by `target_conversation_id`. Do not delete WAL/SHM files or copy only
+the main file from a running process.
 
-| 级别 | 宽度 | 帧率 | 颜色数 | 说明 |
-|------|------|------|--------|------|
-| quality | 原始 | 原始 | 256 | 最高质量 |
-| balanced | 320px | 原始 | 256 | 与旧版压缩回退一致 |
-| compact | 200px | 8fps | 64 | 压缩 |
-| minimal | 160px | 5fps | 32 | 最大压缩 |
+The Message Store already keys rows by `source_bot` and `conversation_id`.
+Bridge reads those existing values during preflight without changing Message
+Store tables, indexes, payloads, or event types. Migration diagnostics contain
+only bounded counts and non-secret route identities. The migration does not
+rewrite a message that was already sent with an incorrect reply reference;
+after deployment an operator must explicitly remove and resend that message if
+desired. Do not delete one of two valid rows merely because their native ids
+are equal in different conversations.
 
-### 群组映射
+### Direct mapping persistence
 
-#### 群组对群组模式
+Immediate forwarding has one explicit durability owner. QQ and Telegram
+handlers return a typed outcome containing exact source/target installations,
+conversations, native message ids, and one of
+`NewDelivery`, `AlreadyPersisted`, or `NotForwarded`. The forwarding runtime
+passes that value through without querying the mapping table after the bot
+send.
 
-```toml
-[[group_mappings.group_to_group]]
-telegram_group_id = "YOUR_TG_GROUP_ID"
-qq_group_id = "YOUR_QQ_GROUP_ID"
-show_qq_to_tg_sender = true    # QQ -> TG 消息显示发送者名称
-show_tg_to_qq_sender = true    # TG -> QQ 消息显示发送者名称
-enable_qq_to_tg = true         # 启用 QQ -> TG 转发
-enable_tg_to_qq = true         # 启用 TG -> QQ 转发
-```
+For `NewDelivery`, `BridgeActor` performs the only primary mapping upsert and
+publishes `MessageForwarded` only after that write succeeds. For
+`AlreadyPersisted`, the pre-send de-duplication read supplies the durable
+target id, so the actor emits the existing completion without another bot send
+or mapping write. An incomplete result or failed upsert emits
+`MessageForwardFailed`; it does not blindly repeat a bot send whose remote side
+effect may already have succeeded. A message outside configured mappings, a
+route disabled for that direction, a loop-suppressed message, or an accepted
+deferred media-group item is a successful no-op rather than a
+`bridge_not_forwarded` failure. An attempted delivery failure remains explicit
+as `bridge_delivery_failed`.
 
-#### Topic 对群组模式
+Retry completion and deferred Telegram media-group flush remain specialized
+persistence owners because they update retry state or fan one target id out to
+multiple source mappings. An inline QQ media-group send is awaited normally
+and returns its primary Telegram message id to the actor for the single direct
+upsert.
 
-```toml
-[[group_mappings.topic_to_group]]
-telegram_group_id = "YOUR_TG_GROUP_ID"
-show_qq_to_tg_sender = true
-show_tg_to_qq_sender = true
+### Message retry operations
 
-[[group_mappings.topics]]
-telegram_group_id = "YOUR_TG_GROUP_ID"   # 所属 Telegram 群
-telegram_topic_id = 33                    # Topic ID
-qq_group_id = "YOUR_QQ_GROUP_ID"
-show_qq_to_tg_sender = true
-show_tg_to_qq_sender = false
-```
+When `enable_retry_queue` is `true`, one worker belongs to the active bridge
+actor generation. A definitely-not-submitted, retryable QQ-to-Telegram or
+Telegram-to-QQ failure is stored in `bridge_message_retry_queue`; the worker
+resends through the exact-installation `BotOperationGateway`, writes the
+source-to-target mapping, and removes the queue row only after both persistence
+operations succeed. Pending runnable rows survive process restart and actor
+reload. Reload stops the retired generation's worker before post-cutover
+ingress can initialize the candidate worker.
 
-一个 Telegram 群可以配置多个 Topic，每个 Topic 映射到不同的 QQ 群。
+DNS/connect, proxy-tunnel, and TLS-handshake failures before HTTP request
+writing are definitely not submitted and may be retried. Once request writing
+begins, a timeout or disconnect remains possibly submitted. A possibly
+submitted send is never automatically retried and creates no fabricated
+mapping. The existing retry row is terminalized with its finite
+attempt fields; no new outbox or reconciliation table is introduced. A process
+crash at the provider boundary still cannot prove exactly-once delivery.
+Duplicate enqueue identity contains the complete source message identity and
+the exact target installation/platform/conversation. Retry callbacks are
+registered by target installation but validate the persisted target
+conversation against the configured pair before dispatch, so a removed account
+or route is reported as unavailable and never replaced by another bot, group,
+or chat. Successful completion writes the same two conversations into the
+mapping before removing only that exact retry row.
 
-## 项目结构
+Configure `message_retry_max_attempts`,
+`message_retry_base_interval_sec`, `retry_queue_check_interval_sec`, and
+`max_retry_interval_sec` explicitly; the example uses 5, 2, 10, and 300.
+All four values must be positive, and the base and check intervals must not
+exceed the maximum. Startup, `--validate-config`, and reload reject invalid
+values with `reload_actor_config_invalid` before activating the generation.
 
-```
-obcx-plugin-bridge/
-├── include/                    # 头文件
-│   ├── config.hpp              # 配置结构与加载
-│   ├── media_converter.hpp     # 媒体格式转换（WebM/TGS -> GIF）
-│   ├── media_processor.hpp     # 通用媒体处理
-│   ├── path_manager.hpp        # 主机/容器路径映射
-│   ├── retry_queue_manager.hpp # 消息重试队列
-│   ├── database/               # 数据库管理
-│   ├── qq/                     # QQ 侧处理器
-│   └── telegram/               # Telegram 侧处理器
-├── dependency/                 # 实现代码 -> libbridge_core.so
-│   ├── config.cpp
-│   ├── media_converter.cpp
-│   ├── media_processor.cpp
-│   ├── path_manager.cpp
-│   ├── retry_queue_manager.cpp
-│   ├── database/               # SQLite 数据库操作
-│   ├── qq/                     # QQ 消息处理、格式化、事件
-│   └── telegram/               # Telegram 消息处理、格式化、事件
-├── qq_to_tg/                   # QQ -> TG 插件入口
-├── tg_to_qq/                   # TG -> QQ 插件入口
-├── tests/                      # 测试
-├── example_plug_config.toml    # 配置示例
-└── plugin.toml                 # 插件元信息
-```
+Diagnostics distinguish an explicitly disabled queue (`消息发送失败且未启用重试`)
+from an enabled but unavailable queue (`消息发送失败且重试队列不可用`). Retry logs
+contain platform direction, source identity, and attempt outcome, but not
+message bodies, bot tokens, proxy credentials, or complete API responses.
 
-## 许可证
+[`actor-config.example.toml`](actor-config.example.toml) lists the bot,
+media, pair, and group-mapping options. Named pairs contain one exact Telegram
+and OneBot installation; the scalar fields remain the one-pair compatibility
+form. Use the actor dependency and database block above as the current runtime
+contract.
+
+## Features
+
+- Bidirectional QQ group and Telegram group/topic forwarding
+- Cross-platform reply and message-id mapping
+- Image, video, audio, document, sticker, and GIF forwarding
+- WebM/TGS-to-GIF conversion with size fallbacks
+- Persistent retry queues with exponential backoff
+- Group-to-group and topic-to-group mappings
+
+## Tests
+
+The repository tests cover reflected actor dispatch, mapping persistence,
+retries, message adaptation, database schema, and forwarding failure behavior.
+The OBCX cross-repository conformance test additionally installs a clean SDK,
+builds and installs bridge plus message-store, dynamically loads both actors,
+and verifies the complete pipeline and shutdown path.
+
+## License
 
 MIT

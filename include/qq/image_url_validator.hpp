@@ -2,9 +2,14 @@
 
 #include <boost/asio.hpp>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
+
+namespace bridge {
+struct BridgeConfig;
+}
 
 namespace bridge::qq {
 
@@ -24,6 +29,35 @@ struct ImageUrlValidation {
   std::string failure_reason; // 仅在失败时填充，便于日志/提示
 };
 
+struct DownloadedImage {
+  std::string type;
+  std::string original_url;
+  std::string filename;
+  std::string mime_type;
+  std::string data;
+};
+
+enum class MediaDownloadFailure : std::uint8_t {
+  None,
+  InvalidUrl,
+  Transport,
+  HttpStatus,
+  OverLimit,
+  EmptyBody,
+  InvalidImage,
+  InvalidDimensions,
+  UnsafeDimensions,
+  NormalizationFailed,
+};
+
+struct MediaDownloadResult {
+  std::optional<DownloadedImage> image;
+  MediaDownloadFailure failure{MediaDownloadFailure::None};
+  std::string diagnostic;
+
+  [[nodiscard]] auto succeeded() const -> bool { return image.has_value(); }
+};
+
 /**
  * @brief QQ 图片 URL 预校验器
  *
@@ -34,8 +68,8 @@ struct ImageUrlValidation {
  *
  * 本组件按以下策略缓解：
  *   1. 对每个 URL 用 GET (Range: bytes=0-0) 探测；
- *   2. 失败时按指数退避（base * 2^k）重试若干次，配置见 config::IMAGE_URL_*；
- *   3. 仍失败的 URL 一律替换为 config::IMAGE_PLACEHOLDER_URL，
+ *   2. 失败时按 actor 代际配置做指数退避重试；
+ *   3. 仍失败的 URL 一律替换为该代配置的占位图，
  *      保证该批次仍能整体提交给 Telegram；
  *   4. 多个 URL 的探测在同一个执行器上并发进行，整体延迟接近最慢的那条。
  */
@@ -48,6 +82,7 @@ public:
    * @return 与输入等长的校验结果。Caller 根据 status 决定如何重组 media_list。
    */
   static auto validate(
+      const bridge::BridgeConfig &config,
       const std::vector<std::pair<std::string, std::string>> &media)
       -> boost::asio::awaitable<std::vector<ImageUrlValidation>>;
 
@@ -57,10 +92,17 @@ public:
    *        输出，方便上层把失败数量提示给用户。
    */
   static auto sanitize(
+      const bridge::BridgeConfig &config,
       const std::vector<std::pair<std::string, std::string>> &media,
       std::vector<std::string> &replaced_urls)
       -> boost::asio::awaitable<
           std::vector<std::pair<std::string, std::string>>>;
+
+  /** Download effective media URLs into order-preserving item outcomes. */
+  static auto download(
+      const bridge::BridgeConfig &config,
+      const std::vector<std::pair<std::string, std::string>> &media)
+      -> boost::asio::awaitable<std::vector<MediaDownloadResult>>;
 };
 
 } // namespace bridge::qq

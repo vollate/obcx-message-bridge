@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -50,19 +51,21 @@ public:
    * Each call resets the debounce timer for that group. When the timer fires,
    * `flush_fn` is invoked once with all events accumulated so far.
    */
-  void add(obcx::common::MessageEvent event, FlushFn flush_fn);
+  void add(std::string source_installation, obcx::common::MessageEvent event,
+           FlushFn flush_fn);
 
   /**
    * @brief Flush all currently buffered groups synchronously.
    *
-   * Called during plugin shutdown to ensure no group is silently dropped if
+   * Called during actor shutdown to ensure no group is silently dropped if
    * its debounce timer was still pending. Each group's stored callback is
    * invoked exactly once on the calling thread.
    */
   void flush_all_now();
 
 private:
-  using GroupKey = std::pair<std::string, std::string>; // (chat_id, mgid)
+  using GroupKey =
+      std::tuple<std::string, std::string, std::string>; // bot, chat, mgid
 
   struct Group {
     std::vector<obcx::common::MessageEvent> events;

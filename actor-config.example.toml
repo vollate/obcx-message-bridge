@@ -1,0 +1,215 @@
+# OBCX message-store -> bridge actor pipeline
+[global]
+locale = "zh_CN.UTF8"
+
+[bots.qq_bot]
+enabled = true
+surface = "onebot11.qq"
+transport = "websocket"
+
+[bots.qq_bot.connection]
+host = "127.0.0.1"
+port = 3001
+access_token = ""
+connect_timeout_ms = 5000
+action_timeout_ms = 30000
+
+[bots.telegram_bot]
+enabled = true
+surface = "telegram.bot_api"
+transport = "http"
+
+[bots.telegram_bot.connection]
+host = "api.telegram.org"
+port = 443
+access_token = "YOUR_BOT_TOKEN"
+# Required to route /command@bot_username without accepting another bot's
+# explicitly targeted commands.
+bot_username = "your_bot_username"
+use_tls = true
+connect_timeout_ms = 5000
+action_timeout_ms = 30000
+poll_timeout_ms = 25000
+poll_force_close_ms = 30000
+poll_retry_interval_ms = 3000
+proxy_host = "127.0.0.1"
+proxy_port = 10086
+proxy_type = "http"
+proxy_username = ""
+proxy_password = ""
+
+[actor_runtime.scheduler]
+policy = "stealing"
+workers = 0
+slow_resume_warning_ms = 10
+
+[db.instances.main]
+type = "sqlite"
+path = "bridge_bot.db"
+
+[actors.message_store]
+library = "message_store"
+enabled = true
+partition = "source_platform:conversation_id"
+db = "main"
+db_namespace = "message_store"
+
+[actors.bridge]
+library = "bridge"
+enabled = true
+partition = "source_bot:conversation_id"
+db = "main"
+db_namespace = "bridge"
+
+[actors.bridge.config]
+# Named pairs are required for multi-account routing. Existing single-pair
+# deployments may instead keep telegram_installation/onebot11_installation;
+# never mix the scalar and collection forms.
+legacy_state_pair = "primary"
+# Schema-v3 migration stops on unresolved v2 mappings by default. Set this to
+# "archive" only after inspecting the migration report and accepting that the
+# archived rows cannot be used by replies, deduplication, edits, or recalls.
+legacy_unresolved_mapping_policy = "fail"
+database_file = "bridge_bot.db"
+enable_retry_queue = true
+message_retry_max_attempts = 5
+message_retry_base_interval_sec = 2
+retry_queue_check_interval_sec = 10
+max_retry_interval_sec = 300
+bridge_files_dir = "/tmp/bridge_files"
+bridge_files_container_dir = "/root/llonebot/bridge_files"
+ffmpeg_path = "ffmpeg"
+gif_max_file_size = 0
+gif_max_duration = 5
+gif_max_fps = 0
+gif_max_width = 0
+gif_max_colors = 256
+# Full QQ images used by Telegram multipart fallback. Must be 1..10485760.
+qq_media_download_max_bytes = 10485760
+# Direct PNG used when a QQ image is unavailable.
+image_placeholder_url = "https://placehold.co/512x512/e9ecef/495057/png?text=NOT+FOUND"
+
+[[actors.bridge.config.installation_pairs]]
+id = "primary"
+telegram_installation = "telegram_bot"
+onebot11_installation = "qq_bot"
+
+# Add another disjoint pair with a unique id and two additional enabled bots:
+# [[actors.bridge.config.installation_pairs]]
+# id = "secondary"
+# telegram_installation = "telegram_bot_2"
+# onebot11_installation = "qq_bot_2"
+
+# Migration-only history for a route removed or changed before schema v3.
+# Omit entries already represented by current group_mappings. These values are
+# ignored after version 3 is published and contain no bot credentials.
+# [[actors.bridge.config.legacy_mapping_routes]]
+# pair = "primary"
+# telegram_conversation_id = "chat:-1001234567890"
+# telegram_topic_id = -1
+# qq_conversation_id = "group:123456789"
+
+[command_runtime]
+timeout_ms = 5000
+
+[command_runtime.help]
+page_bytes = 3500
+maximum_pages = 10
+
+[command_runtime.access.groups]
+mode = "unrestricted"
+entries = []
+
+[command_runtime.access.users]
+mode = "unrestricted"
+entries = []
+
+[[command_runtime.message_observers]]
+actor = "bridge"
+platforms = ["telegram"]
+bots = ["telegram_bot"]
+timeout_ms = 5000
+
+[[command_runtime.routes]]
+actor = "bridge"
+commands = ["recall", "bridge_status", "poke"]
+platforms = ["telegram"]
+bots = ["telegram_bot"]
+fallback = "continue"
+
+[[command_runtime.routes]]
+actor = "bridge"
+commands = ["bridge_status"]
+platforms = ["qq"]
+bots = ["qq_bot"]
+fallback = "continue"
+
+[pipelines.heartbeat]
+source = "obcx::core::events::RawHeartbeatEvent"
+
+[[pipelines.heartbeat.stages]]
+name = "observe"
+actor = "bridge"
+input = "obcx::core::events::RawHeartbeatEvent"
+mode = "await"
+
+[pipelines.message_sent]
+source = "obcx::core::events::BotMessageSentEvent"
+
+[[pipelines.message_sent.stages]]
+name = "observe"
+actor = "bridge"
+input = "obcx::core::events::BotMessageSentEvent"
+mode = "await"
+
+[pipelines.notice]
+source = "obcx::core::events::RawNoticeEvent"
+
+[[pipelines.notice.stages]]
+name = "observe"
+actor = "bridge"
+input = "obcx::core::events::RawNoticeEvent"
+mode = "await"
+
+[pipelines.message]
+source = "obcx::core::events::RawMessageEvent"
+
+[[pipelines.message.stages]]
+name = "persist"
+actor = "message_store"
+input = "obcx::core::events::RawMessageEvent"
+output = "obcx::message_store::events::MessageStored"
+mode = "await"
+
+[[pipelines.message.stages]]
+name = "forward"
+actor = "bridge"
+input = "obcx::message_store::events::MessageStored"
+output = ["bridge::events::MessageForwarded", "bridge::events::MessageForwardFailed"]
+after = ["persist"]
+mode = "await"
+
+[[group_mappings.group_to_group]]
+pair = "primary"
+telegram_group_id = "YOUR_TG_GROUP_ID"
+qq_group_id = "YOUR_QQ_GROUP_ID"
+mode = "group_to_group"
+show_qq_to_tg_sender = true
+show_tg_to_qq_sender = true
+enable_qq_to_tg = true
+enable_tg_to_qq = true
+
+[[group_mappings.topic_to_group]]
+pair = "primary"
+telegram_group_id = "YOUR_TOPIC_TG_GROUP_ID"
+mode = "topic_to_group"
+show_qq_to_tg_sender = true
+show_tg_to_qq_sender = true
+
+[[group_mappings.topics]]
+pair = "primary"
+telegram_group_id = "YOUR_TOPIC_TG_GROUP_ID"
+telegram_topic_id = 33
+qq_group_id = "YOUR_TOPIC_QQ_GROUP_ID"
+show_qq_to_tg_sender = true
+show_tg_to_qq_sender = true

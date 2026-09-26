@@ -7,19 +7,69 @@
 #include <chrono>
 #include <deque>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 
 namespace bridge {
 
+class BridgeStateRepository;
+
+enum class MessageSendDisposition {
+  Completed,
+  RetryableFailure,
+  TerminalFailure,
+  OutcomeUnknown,
+};
+
+struct MessageSendOutcome {
+  MessageSendDisposition disposition = MessageSendDisposition::TerminalFailure;
+  std::optional<std::string> target_message_id;
+  std::string diagnostic;
+
+  [[nodiscard]] static auto completed(std::string message_id)
+      -> MessageSendOutcome {
+    return {.disposition = MessageSendDisposition::Completed,
+            .target_message_id = std::move(message_id)};
+  }
+  [[nodiscard]] static auto retryable(std::string diagnostic)
+      -> MessageSendOutcome {
+    return {.disposition = MessageSendDisposition::RetryableFailure,
+            .diagnostic = std::move(diagnostic)};
+  }
+  [[nodiscard]] static auto terminal(std::string diagnostic)
+      -> MessageSendOutcome {
+    return {.disposition = MessageSendDisposition::TerminalFailure,
+            .diagnostic = std::move(diagnostic)};
+  }
+  [[nodiscard]] static auto unknown(std::string diagnostic)
+      -> MessageSendOutcome {
+    return {.disposition = MessageSendDisposition::OutcomeUnknown,
+            .diagnostic = std::move(diagnostic)};
+  }
+};
+
+struct RetryQueuePolicy {
+  int message_retry_base_interval_sec = 2;
+  int media_retry_base_interval_sec = 5;
+  int retry_queue_check_interval_sec = 10;
+  int max_retry_interval_sec = 300;
+};
+
 /**
- * @brief In-memory message retry info (no database persistence)
+ * @brief Message retry info used by the in-memory scheduler and optional
+ * persistent bridge state repository.
  */
 struct MessageRetryEntry {
+  std::string source_installation;
   std::string source_platform;
+  std::string source_conversation_id;
+  std::string target_installation;
   std::string target_platform;
+  std::string target_conversation_id;
   std::string source_message_id;
   obcx::common::Message message; // Store message directly, no serialization
   std::string group_id;
@@ -36,6 +86,7 @@ struct MessageRetryEntry {
  * @brief In-memory media download retry info (no database persistence)
  */
 struct MediaDownloadRetryEntry {
+  std::string installation_id;
   std::string platform;
   std::string file_id;
   std::string file_type;
@@ -50,17 +101,18 @@ struct MediaDownloadRetryEntry {
 };
 
 /**
- * @brief 重试队列管理器 (In-memory, non-persistent)
+ * @brief 重试队列管理器
  *
  * 负责管理消息发送重试和媒体下载重试的队列处理
  * 实现指数退避算法，避免频繁重试导致的系统压力
- * 所有数据存储在内存中，重启后清空
+ * Message retry state can be persisted when a BridgeStateRepository is
+ * provided. Media download retry state remains in-memory for now.
  */
 class RetryQueueManager
     : public std::enable_shared_from_this<RetryQueueManager> {
 public:
   using MessageSendCallback =
-      std::function<boost::asio::awaitable<std::optional<std::string>>(
+      std::function<boost::asio::awaitable<MessageSendOutcome>(
           const MessageRetryEntry &retry_info,
           const obcx::common::Message &message)>;
 
@@ -73,7 +125,11 @@ public:
    * @brief 构造函数
    * @param io_context ASIO IO上下文
    */
-  explicit RetryQueueManager(boost::asio::io_context &io_context);
+  explicit RetryQueueManager(boost::asio::io_context &io_context,
+                             RetryQueuePolicy policy = {});
+  RetryQueueManager(boost::asio::io_context &io_context,
+                    std::shared_ptr<BridgeStateRepository> state_repository,
+                    RetryQueuePolicy policy = {});
 
   /**
    * @brief 析构函数
@@ -90,11 +146,18 @@ public:
    */
   void stop();
 
+  /** Completes when the queue-processing coroutine has fully retired. */
+  [[nodiscard]] auto stopped() const -> std::shared_future<void>;
+
   /**
    * @brief 添加消息发送重试
    */
-  void add_message_retry(const std::string &source_platform,
+  void add_message_retry(const std::string &source_installation,
+                         const std::string &source_platform,
+                         const std::string &source_conversation_id,
+                         const std::string &target_installation,
                          const std::string &target_platform,
+                         const std::string &target_conversation_id,
                          const std::string &source_message_id,
                          const obcx::common::Message &message,
                          const std::string &group_id,
@@ -105,7 +168,8 @@ public:
   /**
    * @brief 添加媒体下载重试
    */
-  void add_media_download_retry(const std::string &platform,
+  void add_media_download_retry(const std::string &installation_id,
+                                const std::string &platform,
                                 const std::string &file_id,
                                 const std::string &file_type,
                                 const std::string &download_url,
@@ -122,7 +186,7 @@ public:
   /**
    * @brief 注册媒体下载回调函数
    */
-  void register_media_download_callback(const std::string &platform,
+  void register_media_download_callback(const std::string &installation_id,
                                         MediaDownloadCallback callback);
 
   /**
@@ -140,10 +204,21 @@ public:
    */
   auto get_pending_media_retry_count() const -> size_t;
 
+  /**
+   * @brief Restore persisted message retries into the in-memory processing
+   * queue.
+   */
+  void restore_persisted_message_retries();
+
 private:
   boost::asio::io_context &io_context_;
+  std::shared_ptr<BridgeStateRepository> state_repository_;
+  RetryQueuePolicy policy_;
   std::unique_ptr<boost::asio::steady_timer> retry_timer_;
   std::atomic_bool running_;
+  std::promise<void> stopped_promise_;
+  std::shared_future<void> stopped_future_;
+  std::atomic_bool stopped_signalled_{false};
 
   // In-memory retry queues (thread-safe)
   mutable std::mutex message_retry_mutex_;
@@ -155,12 +230,6 @@ private:
   std::unordered_map<std::string, MessageSendCallback> message_send_callbacks_;
   std::unordered_map<std::string, MediaDownloadCallback>
       media_download_callbacks_;
-
-  // Retry configuration
-  static constexpr int DEFAULT_MESSAGE_RETRY_INTERVAL_SECONDS = 2;
-  static constexpr int DEFAULT_MEDIA_RETRY_INTERVAL_SECONDS = 5;
-  static constexpr int MAX_RETRY_INTERVAL_SECONDS = 300; // 5 minutes
-  static constexpr int RETRY_QUEUE_CHECK_INTERVAL_SECONDS = 10;
 
   /**
    * @brief 定期检查重试队列
@@ -183,6 +252,8 @@ private:
   auto calculate_next_retry_time(int retry_count,
                                  int base_interval_seconds) const
       -> std::chrono::system_clock::time_point;
+
+  void signal_stopped() noexcept;
 };
 
 } // namespace bridge

@@ -1,0 +1,169 @@
+#pragma once
+
+#include "bridge_forwarder.hpp"
+#include "bridge_state_repository.hpp"
+
+#include <core/actor/actor_commands.hpp>
+#include <core/actor/actor_messages.hpp>
+#include <core/actor/reflected_actor.hpp>
+
+#include <boost/asio/any_io_executor.hpp>
+#include <boost/asio/awaitable.hpp>
+
+#include <memory>
+#include <mutex>
+#include <string>
+
+namespace bridge {
+
+class ReceivedMessageRepository;
+struct BridgeConfig;
+
+} // namespace bridge
+
+namespace bridge {
+
+namespace commands {
+struct RecallCommand final : obcx::command::RequestMessage<RecallCommand> {};
+struct BridgeStatusCommand final
+    : obcx::command::RequestMessage<BridgeStatusCommand> {};
+struct PokeCommand final : obcx::command::RequestMessage<PokeCommand> {};
+} // namespace commands
+
+class BridgeActor final : public obcx::core::ReflectedActor<BridgeActor> {
+public:
+  static constexpr std::string_view actor_name = "bridge";
+  static constexpr std::string_view actor_version = "0.2.0";
+
+  static constexpr auto command_contract() {
+    return obcx::command::catalog(
+        obcx::command::observe<commands::RecallCommand>(
+            "recall", "Recall the replied bridged message"),
+        obcx::command::observe<commands::BridgeStatusCommand>(
+            "bridge_status", "Show Telegram and QQ bridge status"),
+        obcx::command::observe<commands::PokeCommand>(
+            "poke", "Poke the replied QQ user"));
+  }
+
+  [[nodiscard]] static auto configuration_contract() -> obcx::common::json {
+    return {
+        {"integers",
+         {{"max_retry_interval_sec", {{"default", 300}, {"minimum", 1}}},
+          {"message_retry_base_interval_sec", {{"default", 2}, {"minimum", 1}}},
+          {"message_retry_max_attempts", {{"default", 5}, {"minimum", 1}}},
+          {"retry_queue_check_interval_sec",
+           {{"default", 10}, {"minimum", 1}}}}},
+        {"required_strings",
+         obcx::common::json::array(
+             {"bridge_files_dir", "bridge_files_container_dir"})},
+        {"bot_installations",
+         {{"onebot11_installation",
+           {{"types", "onebot11.qq"}, {"alternative_group", "bridge_pairs"}}},
+          {"telegram_installation",
+           {{"types", "telegram.bot_api"},
+            {"alternative_group", "bridge_pairs"}}}}},
+        {"bot_installation_collections",
+         {{"installation_pairs",
+           {{"minimum_items", 1},
+            {"identity", "id"},
+            {"bot_installations",
+             {{"onebot11_installation", "onebot11.qq"},
+              {"telegram_installation", "telegram.bot_api"}}},
+            {"unique_fields",
+             obcx::common::json::array(
+                 {"onebot11_installation", "telegram_installation"})},
+            {"alternative_group", "bridge_pairs"}}}}},
+        {"collection_identity_references",
+         obcx::common::json::array(
+             {{{"source_key", "legacy_state_pair"},
+               {"target_collection", "installation_pairs"},
+               {"target_identity", "id"},
+               {"optional", true}},
+              {{"source_key", "pair"},
+               {"root_section", "group_mappings"},
+               {"source_collections",
+                obcx::common::json::array(
+                    {"group_to_group", "topic_to_group", "topics"})},
+               {"target_collection", "installation_pairs"},
+               {"target_identity", "id"},
+               {"optional", true},
+               {"required_when_target_multiple", true}},
+              {{"source_key", "pair"},
+               {"root_section", "actors.bridge.config"},
+               {"source_collections",
+                obcx::common::json::array({"legacy_mapping_routes"})},
+               {"target_collection", "installation_pairs"},
+               {"target_identity", "id"},
+               {"optional", true},
+               {"required_when_target_multiple", true}}})},
+        {"less_equal",
+         obcx::common::json::array(
+             {obcx::common::json::array({"message_retry_base_interval_sec",
+                                         "max_retry_interval_sec"}),
+              obcx::common::json::array({"retry_queue_check_interval_sec",
+                                         "max_retry_interval_sec"})})},
+    };
+  }
+
+  BridgeActor() = default;
+
+  [[nodiscard]] auto prepare_generation(obcx::core::ActorContext &context)
+      -> obcx::core::ActorPreparationResult;
+
+  auto handle(const obcx::message_store::events::MessageStored &stored,
+              const obcx::core::MessageEnvelope &message,
+              obcx::core::ActorContext &context)
+      -> obcx::core::ActorTask<obcx::core::ActorResult>;
+  auto handle(const obcx::core::events::RawNoticeEvent &notice,
+              const obcx::core::MessageEnvelope &message,
+              obcx::core::ActorContext &context)
+      -> obcx::core::ActorTask<obcx::core::ActorResult>;
+  auto handle(const obcx::core::events::RawMessageEvent &event,
+              const obcx::core::MessageEnvelope &message,
+              obcx::core::ActorContext &context)
+      -> obcx::core::ActorTask<obcx::core::ActorResult>;
+  auto handle(const obcx::core::events::BotMessageSentEvent &event,
+              const obcx::core::MessageEnvelope &message,
+              obcx::core::ActorContext &context)
+      -> obcx::core::ActorTask<obcx::core::ActorResult>;
+  auto handle(const obcx::core::events::RawHeartbeatEvent &heartbeat,
+              const obcx::core::MessageEnvelope &message,
+              obcx::core::ActorContext &context)
+      -> obcx::core::ActorTask<obcx::core::ActorResult>;
+  auto handle(const commands::RecallCommand &request,
+              const obcx::core::MessageEnvelope &message,
+              obcx::core::ActorContext &context)
+      -> obcx::core::ActorTask<obcx::core::ActorResult>;
+  auto handle(const commands::BridgeStatusCommand &request,
+              const obcx::core::MessageEnvelope &message,
+              obcx::core::ActorContext &context)
+      -> obcx::core::ActorTask<obcx::core::ActorResult>;
+  auto handle(const commands::PokeCommand &request,
+              const obcx::core::MessageEnvelope &message,
+              obcx::core::ActorContext &context)
+      -> obcx::core::ActorTask<obcx::core::ActorResult>;
+
+private:
+  auto refresh_platform_activity(const obcx::core::MessageEnvelope &message,
+                                 obcx::core::ActorContext &context)
+      -> obcx::core::ActorTask<obcx::core::ActorResult>;
+  auto handle_command(const obcx::command::CommandInvocation &invocation,
+                      const obcx::core::MessageEnvelope &message,
+                      obcx::core::ActorContext &context)
+      -> obcx::core::ActorTask<obcx::core::ActorResult>;
+  auto resolve_repository(obcx::core::ActorContext &context)
+      -> std::shared_ptr<BridgeStateRepository>;
+  auto resolve_forwarder(obcx::core::ActorContext &context,
+                         boost::asio::any_io_executor executor)
+      -> std::shared_ptr<IBridgeForwarder>;
+  auto resolve_config(obcx::core::ActorContext &context)
+      -> std::shared_ptr<const BridgeConfig>;
+
+  std::shared_ptr<const BridgeConfig> config_;
+  std::shared_ptr<BridgeStateRepository> repository_;
+  std::shared_ptr<IBridgeForwarder> forwarder_;
+  std::shared_ptr<ReceivedMessageRepository> received_message_repository_;
+  std::recursive_mutex runtime_mutex_;
+};
+
+} // namespace bridge
