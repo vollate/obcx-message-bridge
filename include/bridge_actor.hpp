@@ -32,17 +32,17 @@ struct PokeCommand final : obcx::command::RequestMessage<PokeCommand> {};
 
 class BridgeActor final : public obcx::core::ReflectedActor<BridgeActor> {
 public:
-  static constexpr std::string_view actor_name = "bridge";
-  static constexpr std::string_view actor_version = "0.2.0";
-
   static constexpr auto command_contract() {
     return obcx::command::catalog(
-        obcx::command::observe<commands::RecallCommand>(
-            "recall", "Recall the replied bridged message"),
-        obcx::command::observe<commands::BridgeStatusCommand>(
-            "bridge_status", "Show Telegram and QQ bridge status"),
-        obcx::command::observe<commands::PokeCommand>(
-            "poke", "Poke the replied QQ user"));
+        obcx::command::actor_scoped(
+            obcx::command::observe<commands::RecallCommand>(
+                "recall", "Recall the replied bridged message")),
+        obcx::command::actor_scoped(
+            obcx::command::observe<commands::BridgeStatusCommand>(
+                "bridge_status", "Show Telegram and QQ bridge status")),
+        obcx::command::actor_scoped(
+            obcx::command::observe<commands::PokeCommand>(
+                "poke", "Poke the replied QQ user")));
   }
 
   [[nodiscard]] static auto configuration_contract() -> obcx::common::json {

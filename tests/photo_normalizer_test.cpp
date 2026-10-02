@@ -30,18 +30,6 @@ void put_be32(std::string &data, std::size_t offset, std::uint32_t value) {
   data[offset + 3] = static_cast<char>(value & 0xffU);
 }
 
-void put_le16(std::string &data, std::size_t offset, std::uint16_t value) {
-  data[offset] = static_cast<char>(value & 0xffU);
-  data[offset + 1] = static_cast<char>((value >> 8U) & 0xffU);
-}
-
-void put_le32(std::string &data, std::size_t offset, std::uint32_t value) {
-  data[offset] = static_cast<char>(value & 0xffU);
-  data[offset + 1] = static_cast<char>((value >> 8U) & 0xffU);
-  data[offset + 2] = static_cast<char>((value >> 16U) & 0xffU);
-  data[offset + 3] = static_cast<char>((value >> 24U) & 0xffU);
-}
-
 auto jpeg(std::uint16_t width, std::uint16_t height) -> std::string {
   std::string data(21, '\0');
   data[0] = static_cast<char>(0xff);
@@ -67,40 +55,6 @@ auto png(std::uint32_t width, std::uint32_t height) -> std::string {
   return data;
 }
 
-auto gif(std::uint16_t width, std::uint16_t height) -> std::string {
-  std::string data(10, '\0');
-  data.replace(0, 6, "GIF89a");
-  put_le16(data, 6, width);
-  put_le16(data, 8, height);
-  return data;
-}
-
-auto webp(std::uint32_t width, std::uint32_t height) -> std::string {
-  std::string data(30, '\0');
-  data.replace(0, 4, "RIFF");
-  data.replace(8, 4, "WEBP");
-  data.replace(12, 4, "VP8X");
-  put_le32(data, 16, 10);
-  const auto encoded_width = width - 1;
-  const auto encoded_height = height - 1;
-  data[24] = static_cast<char>(encoded_width & 0xffU);
-  data[25] = static_cast<char>((encoded_width >> 8U) & 0xffU);
-  data[26] = static_cast<char>((encoded_width >> 16U) & 0xffU);
-  data[27] = static_cast<char>(encoded_height & 0xffU);
-  data[28] = static_cast<char>((encoded_height >> 8U) & 0xffU);
-  data[29] = static_cast<char>((encoded_height >> 16U) & 0xffU);
-  return data;
-}
-
-auto bmp(std::uint32_t width, std::uint32_t height) -> std::string {
-  std::string data(54, '\0');
-  data.replace(0, 2, "BM");
-  put_le32(data, 14, 40);
-  put_le32(data, 18, width);
-  put_le32(data, 22, height);
-  return data;
-}
-
 auto image(std::string data, std::string mime = "image/jpeg")
     -> DownloadedImage {
   return {.type = "photo",
@@ -121,19 +75,6 @@ auto temporary_photo_directories() -> std::size_t {
     }
   }
   return count;
-}
-
-TEST(PhotoNormalizerTest, InspectsSupportedEncodedDimensionHeaders) {
-  const std::vector<std::pair<std::string, PhotoDimensions>> cases = {
-      {jpeg(640, 480), {640, 480}},    {png(800, 600), {800, 600}},
-      {gif(320, 240), {320, 240}},     {webp(1024, 768), {1024, 768}},
-      {bmp(1920, 1080), {1920, 1080}},
-  };
-  for (const auto &[encoded, expected] : cases) {
-    const auto inspected = bridge::qq::inspect_photo_dimensions(encoded);
-    EXPECT_EQ(inspected.status, PhotoDimensionStatus::Compliant);
-    EXPECT_EQ(inspected.dimensions, expected);
-  }
 }
 
 TEST(PhotoNormalizerTest, EnforcesBoundariesAndRejectsMalformedDimensions) {

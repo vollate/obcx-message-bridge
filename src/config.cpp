@@ -442,6 +442,69 @@ auto BridgeInstallationPair::topic_config(const std::string_view tg_group_id,
   return nullptr;
 }
 
+auto bridge_command_routes(const BridgeConfig &config,
+                           const std::string_view command)
+    -> std::vector<BridgeCommandRoute> {
+  if (command != "bridge_status" && command != "recall" && command != "poke") {
+    return {};
+  }
+  std::vector<BridgeCommandRoute> routes;
+  for (const auto &[id, pair] : config.installation_pairs) {
+    for (const auto &[group, mapping] : pair.group_map) {
+      const auto append = [&](const std::string &qq_group,
+                              const std::optional<std::int64_t> topic,
+                              const bool qq_enabled) {
+        if (qq_group.empty()) {
+          return;
+        }
+        routes.push_back({{"telegram", pair.telegram_installation, group,
+                           topic ? obcx::command::TopicSelection::Exact
+                                 : obcx::command::TopicSelection::Any,
+                           topic},
+                          id,
+                          qq_group});
+        if (command == "bridge_status" && qq_enabled) {
+          routes.push_back({{"qq", pair.onebot11_installation, qq_group,
+                             obcx::command::TopicSelection::None, std::nullopt},
+                            id,
+                            group});
+        }
+      };
+      if (mapping.mode == BridgeMode::GROUP_TO_GROUP) {
+        append(mapping.qq_group_id, std::nullopt, mapping.enable_qq_to_tg);
+      } else {
+        for (const auto &topic : mapping.topics) {
+          append(topic.qq_group_id, topic.telegram_topic_id,
+                 topic.enable_qq_to_tg);
+        }
+      }
+    }
+  }
+  return routes;
+}
+
+auto bridge_command_scopes(const BridgeConfig &config,
+                           const std::string_view command)
+    -> obcx::command::GroupScopes {
+  obcx::command::GroupScopes scopes;
+  for (auto &route : bridge_command_routes(config, command)) {
+    scopes.push_back(std::move(route.source));
+  }
+  return scopes;
+}
+
+auto resolve_bridge_command(const BridgeConfig &config,
+                            const std::string_view command,
+                            const obcx::command::Subject &subject)
+    -> std::optional<BridgeCommandRoute> {
+  for (auto &route : bridge_command_routes(config, command)) {
+    if (obcx::command::matches(route.source, subject)) {
+      return std::move(route);
+    }
+  }
+  return std::nullopt;
+}
+
 auto BridgeConfig::pair(const std::string_view pair_id) const
     -> const BridgeInstallationPair * {
   const auto found = installation_pairs.find(std::string{pair_id});

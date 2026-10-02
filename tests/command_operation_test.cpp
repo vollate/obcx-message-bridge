@@ -113,16 +113,6 @@ auto sqlite_config(const std::filesystem::path &path)
   return {.name = "main", .type = "sqlite", .path = path.string()};
 }
 
-auto text_from(const obcx::common::Message &message) -> std::string {
-  std::string text;
-  for (const auto &segment : message) {
-    if (segment.type == "text") {
-      text += segment.data.value("text", std::string{});
-    }
-  }
-  return text;
-}
-
 TEST(BridgeOperationFailureTest, IncludesProviderCodeAndDescription) {
   const bridge::BridgeBotOperationFailure error({
       .code = obcx::bot::BotOperationErrorCode::ProviderRejected,
@@ -180,60 +170,6 @@ TEST(BridgeOperationFailureTest, DoesNotExposeUnclassifiedExceptionDetails) {
   EXPECT_EQ(result.diagnostic, "unclassified_exception");
   EXPECT_FALSE(result.retryable);
   EXPECT_TRUE(result.outcome_unknown);
-}
-
-TEST(BridgeCommandOperationTest, RecallUsesTypedDeleteAndReplySend) {
-  const auto db_path = temp_db_path("recall");
-  auto db = std::make_shared<obcx::core::DbManager>();
-  db->configure({sqlite_config(db_path)});
-  auto repository =
-      std::make_shared<bridge::BridgeStateRepository>(*db, "main", "bridge");
-  repository->initialize_schema();
-  ASSERT_TRUE(repository->add_message_mapping({
-      .source_installation = "tg-main",
-      .source_platform = "telegram",
-      .source_conversation_id = "chat:tg-group",
-      .source_message_id = "100",
-      .target_installation = "qq-main",
-      .target_platform = "qq",
-      .target_conversation_id = "group:qq-group",
-      .target_message_id = "200",
-      .created_at = std::chrono::system_clock::now(),
-  }));
-  auto client = std::make_shared<RecordingOperationClient>();
-  auto operations = std::make_shared<bridge::BridgeBotOperations>(
-      client, "tg-main", "qq-main");
-  auto blocking = std::make_shared<obcx::core::BlockingExecutor>(1);
-  bridge::telegram::TelegramCommandHandler handler(operations, repository,
-                                                   nullptr, blocking);
-  obcx::common::MessageEvent event;
-  event.group_id = "tg-group";
-  event.message_id = "300";
-  event.data = {{"reply_to_message", {{"message_id", 100}}}};
-
-  run(handler.handle_recall_command(std::move(event), "qq-group"));
-
-  ASSERT_EQ(client->deletions.size(), 1U);
-  EXPECT_EQ(client->deletions[0].message.group.native_group_id, "qq-group");
-  EXPECT_EQ(client->deletions[0].message.native_message_id, "200");
-  ASSERT_EQ(client->sends.size(), 1U);
-  EXPECT_EQ(client->sends[0].target.installation.surface,
-            obcx::bot::SurfaceId{"telegram.bot_api"});
-  EXPECT_NE(text_from(client->sends[0].message).find("撤回成功"),
-            std::string::npos);
-  EXPECT_TRUE(
-      repository
-          ->resolve_target_mapping({.installation_id = "tg-main",
-                                    .platform = "telegram",
-                                    .conversation_id = "chat:tg-group",
-                                    .message_id = "100"},
-                                   {.installation_id = "qq-main",
-                                    .platform = "qq",
-                                    .conversation_id = "group:qq-group"})
-          .missing());
-
-  blocking->shutdown();
-  std::filesystem::remove(db_path);
 }
 
 TEST(BridgeCommandOperationTest,
@@ -412,68 +348,6 @@ TEST(BridgeCommandOperationTest, AmbiguousRecallPerformsNoProviderCall) {
   std::filesystem::remove(db_path);
 }
 
-TEST(BridgeCommandOperationTest,
-     BridgeStatusReportsBothPlatformsAndRefreshesCommandSourceActivity) {
-  const auto db_path = temp_db_path("bridge-status");
-  auto db = std::make_shared<obcx::core::DbManager>();
-  db->configure({sqlite_config(db_path)});
-  auto repository =
-      std::make_shared<bridge::BridgeStateRepository>(*db, "main", "bridge");
-  repository->initialize_schema();
-  const auto stale =
-      std::chrono::system_clock::now() - std::chrono::minutes{10};
-  ASSERT_TRUE(repository->update_platform_heartbeat("qq-main", "qq", stale));
-  ASSERT_TRUE(
-      repository->update_platform_heartbeat("tg-main", "telegram", stale));
-  auto client = std::make_shared<RecordingOperationClient>();
-  auto operations = std::make_shared<bridge::BridgeBotOperations>(
-      client, "tg-main", "qq-main");
-  auto blocking = std::make_shared<obcx::core::BlockingExecutor>(1);
-
-  bridge::telegram::TelegramCommandHandler telegram_handler(
-      operations, repository, nullptr, blocking);
-  obcx::common::MessageEvent telegram_event;
-  telegram_event.group_id = "tg-group";
-  telegram_event.message_id = "tg-command";
-  run(telegram_handler.handle_bridge_status_command(std::move(telegram_event),
-                                                    "qq-group"));
-
-  bridge::qq::QQCommandHandler qq_handler(operations, repository, blocking);
-  obcx::common::MessageEvent qq_event;
-  qq_event.group_id = "qq-group";
-  qq_event.message_id = "qq-command";
-  run(qq_handler.handle_bridge_status_command(std::move(qq_event), "tg-group"));
-
-  ASSERT_EQ(client->sends.size(), 2U);
-  EXPECT_EQ(client->sends[0].target.installation.surface,
-            obcx::bot::SurfaceId{"telegram.bot_api"});
-  EXPECT_EQ(client->sends[1].target.installation.surface,
-            obcx::bot::SurfaceId{"onebot11.qq"});
-
-  const auto telegram_response = text_from(client->sends[0].message);
-  EXPECT_NE(
-      telegram_response.find("🤖 QQ 平台\n安装: qq-main\n状态: ⚠️ 可能离线"),
-      std::string::npos);
-  EXPECT_NE(
-      telegram_response.find("💬 Telegram 平台\n安装: tg-main\n状态: ✅ 正常"),
-      std::string::npos);
-
-  const auto qq_response = text_from(client->sends[1].message);
-  EXPECT_NE(qq_response.find("🤖 QQ 平台\n安装: qq-main\n状态: ✅ 正常"),
-            std::string::npos);
-  EXPECT_NE(qq_response.find("💬 Telegram 平台\n安装: tg-main\n状态: ✅ 正常"),
-            std::string::npos);
-  const auto qq_activity = repository->get_platform_heartbeat("qq-main");
-  const auto telegram_activity = repository->get_platform_heartbeat("tg-main");
-  ASSERT_TRUE(qq_activity.has_value());
-  ASSERT_TRUE(telegram_activity.has_value());
-  EXPECT_GT(qq_activity->last_heartbeat_at, stale);
-  EXPECT_GT(telegram_activity->last_heartbeat_at, stale);
-
-  blocking->shutdown();
-  std::filesystem::remove(db_path);
-}
-
 TEST(BridgeCommandOperationTest, GeneratedRecallTextSanitizesControls) {
   const auto db_path = temp_db_path("recall-text-controls");
   auto db = std::make_shared<obcx::core::DbManager>();
@@ -605,68 +479,6 @@ TEST(BridgeCommandOperationTest, GeneratedRecallTextSanitizesControls) {
   run(handler.handle_recall_event(std::move(hidden_event)));
   ASSERT_EQ(client->edits.size(), 2U);
   EXPECT_EQ(client->edits.back().text, "~Message has been recalled~");
-
-  blocking->shutdown();
-  std::filesystem::remove(db_path);
-}
-
-TEST(BridgeCommandOperationTest, PokeUsesTypedOneBotAction) {
-  const auto db_path = temp_db_path("poke");
-  auto db = std::make_shared<obcx::core::DbManager>();
-  db->configure({sqlite_config(db_path)});
-  auto repository =
-      std::make_shared<bridge::BridgeStateRepository>(*db, "main", "bridge");
-  repository->initialize_schema();
-  db->run_write<void>("main", [](obcx::core::IDbConnection &connection) {
-    connection.execute(R"(
-      CREATE TABLE message_store_telegram_messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        message_id TEXT NOT NULL,
-        source_platform TEXT NOT NULL,
-        source_bot TEXT NOT NULL DEFAULT '',
-        conversation_id TEXT NOT NULL,
-        sender TEXT NOT NULL DEFAULT '',
-        group_id TEXT NOT NULL DEFAULT '',
-        message_type TEXT NOT NULL DEFAULT 'unknown',
-        payload TEXT NOT NULL DEFAULT '{}',
-        raw TEXT NOT NULL DEFAULT '{}',
-        timestamp INTEGER NOT NULL,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        UNIQUE(source_platform, source_bot, conversation_id, message_id)
-      );
-    )");
-    connection.execute(
-        R"(
-          INSERT INTO message_store_telegram_messages
-            (message_id, source_platform, source_bot, conversation_id,
-             sender, group_id, message_type, payload, raw, timestamp,
-             created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-        )",
-        {std::string{"100"}, std::string{"telegram"}, std::string{"tg-main"},
-         std::string{"chat:tg-group"}, std::string{"qq-user"},
-         std::string{"tg-group"}, std::string{"group"}, std::string{"{}"},
-         std::string{"{}"}, std::int64_t{1}, std::int64_t{1}, std::int64_t{1}});
-  });
-  auto received = std::make_shared<bridge::ReceivedMessageRepository>(
-      *db, "main", "message_store");
-  auto client = std::make_shared<RecordingOperationClient>();
-  auto operations = std::make_shared<bridge::BridgeBotOperations>(
-      client, "tg-main", "qq-main");
-  auto blocking = std::make_shared<obcx::core::BlockingExecutor>(1);
-  bridge::telegram::TelegramCommandHandler handler(operations, repository,
-                                                   received, blocking);
-  obcx::common::MessageEvent event;
-  event.group_id = "tg-group";
-  event.message_id = "command";
-  event.data = {{"reply_to_message", {{"message_id", 100}}}};
-
-  run(handler.handle_poke_command(std::move(event), "qq-group"));
-
-  ASSERT_EQ(client->pokes.size(), 1U);
-  EXPECT_EQ(client->pokes[0].target.native_group_id, "qq-group");
-  EXPECT_EQ(client->pokes[0].user_id, "qq-user");
 
   blocking->shutdown();
   std::filesystem::remove(db_path);

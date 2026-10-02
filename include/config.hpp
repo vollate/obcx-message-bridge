@@ -1,4 +1,5 @@
 #pragma once
+#include "core/actor/command_availability.hpp"
 #include "core/bot/typed_operation.hpp"
 
 #include "bridge_state_migration.hpp"
@@ -87,6 +88,12 @@ struct BridgeInstallationPair final {
       -> const TopicBridgeConfig *;
 };
 
+struct BridgeCommandRoute {
+  obcx::command::GroupScope source;
+  std::string pair_id;
+  std::string target_group;
+};
+
 /**
  * Immutable after construction and owned by one bridge actor generation.
  * Bot endpoints and credentials intentionally do not live here: they remain
@@ -160,6 +167,17 @@ struct BridgeConfig final {
                                   int64_t topic_id) const
       -> const TopicBridgeConfig *;
 };
+
+[[nodiscard]] auto bridge_command_routes(const BridgeConfig &config,
+                                         std::string_view command)
+    -> std::vector<BridgeCommandRoute>;
+[[nodiscard]] auto bridge_command_scopes(const BridgeConfig &config,
+                                         std::string_view command)
+    -> obcx::command::GroupScopes;
+[[nodiscard]] auto resolve_bridge_command(const BridgeConfig &config,
+                                          std::string_view command,
+                                          const obcx::command::Subject &subject)
+    -> std::optional<BridgeCommandRoute>;
 
 [[nodiscard]] auto load_bridge_config(const obcx::common::ActorConfigView &view)
     -> std::shared_ptr<const BridgeConfig>;

@@ -23,11 +23,16 @@ OBCX validates that contract before constructing the actor.
 
 ## Build Against An Installed SDK
 
+The SDK generates inherited actor name/version from `package.toml` (`actor.name`,
+`package.version`); C++ classes do not redeclare them. Registered actor and internal
+implementation targets automatically log as `[bridge]`; core services keep `[core]`.
+
 The supported baseline is Linux x86_64/arm64, CMake 3.30+, GCC 16.1+, C++26,
 `-freflection`, and `__cpp_impl_reflection >= 202506L`.
 
 Current development uses core's explicit v2 workspace: select `vollate.bridge`,
-bind its declared sources/providers, and prepare the frozen graph before CMake.
+bind its declared sources/providers, and configure with CMake. CMake resolves the
+current graph offline; no package lock or manual graph preparation is required.
 See core's `docs/architecture/package-cmake.md`. The workspace's `tests` profile
 selects Bridge's repository-owned tests; there is no separate test-option default.
 
@@ -36,8 +41,8 @@ cmake --build /path/to/OBCX/build --parallel 20
 ctest --test-dir /path/to/OBCX/build --parallel 20 --output-on-failure -L bridge
 ```
 
-A top-level installed-SDK build requires a prefix, configuration and all six
-`OBCX_PACKAGES_WORKSPACE/LOCK/GRAPH/CACHE/MODE/STATE_DIR` values. It does not
+A top-level installed-SDK build requires a prefix, configuration and all four
+`OBCX_PACKAGES_WORKSPACE/CACHE/MODE/STATE_DIR` values. It does not
 implicitly discover a source workspace. Expanded standalone conformance and
 release acceptance remain deferred; the existing optional pipeline/reload
 conformance sources are retained, not claimed as newly verified.

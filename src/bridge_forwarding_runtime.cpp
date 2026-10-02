@@ -446,34 +446,45 @@ auto BridgeForwardingRuntime::handle_command(
     co_return false;
   }
 
-  const auto &pair = resolve_bridge_source_pair(
-      *config_, invocation.source_platform, invocation.source_bot);
-  const auto runtime = pair_runtimes_.find(pair.id);
+  obcx::command::Subject subject{
+      .platform = invocation.source_platform,
+      .bot = invocation.source_bot,
+      .conversation = obcx::command::ConversationKind::Group,
+      .group_id = *event->group_id,
+      .user_id = invocation.sender,
+  };
+  const auto &source = invocation.source_event;
+  if (!source.is_object() ||
+      source.value("group_id", std::string{}) != subject.group_id ||
+      source.value("sender", std::string{}) != subject.user_id ||
+      (invocation.conversation_id != "group:" + subject.group_id &&
+       !(subject.platform == "telegram" &&
+         invocation.conversation_id == "chat:" + subject.group_id))) {
+    co_return false;
+  }
+  if (source.contains("topic_id")) {
+    if (subject.platform != "telegram" ||
+        !source.at("topic_id").is_number_integer()) {
+      co_return false;
+    }
+    subject.topic_id = source.at("topic_id").get<std::int64_t>();
+  }
+  if (event->data.contains("message_thread_id") &&
+      (!subject.topic_id ||
+       event->data.at("message_thread_id") != *subject.topic_id)) {
+    co_return false;
+  }
+  const auto route = resolve_bridge_command(*config_, invocation.name, subject);
+  if (!route) {
+    co_return false;
+  }
+  const auto runtime = pair_runtimes_.find(route->pair_id);
   if (runtime == pair_runtimes_.end() || !runtime->second) {
-    throw std::runtime_error("bridge pair runtime is unavailable: " + pair.id);
+    throw std::runtime_error("bridge pair runtime is unavailable");
   }
 
   if (invocation.source_platform == "telegram") {
-    if (invocation.name != "recall" && invocation.name != "bridge_status" &&
-        invocation.name != "poke") {
-      co_return false;
-    }
-    const auto telegram_group_id = *event->group_id;
-    const auto *mapping = pair.bridge_config(telegram_group_id);
-    if (mapping == nullptr) {
-      co_return false;
-    }
-    std::string qq_group_id;
-    if (mapping->mode == BridgeMode::GROUP_TO_GROUP) {
-      qq_group_id = mapping->qq_group_id;
-    } else {
-      const auto topic_id =
-          event->data.value("message_thread_id", std::int64_t{-1});
-      qq_group_id = pair.qq_group_id_for_topic(telegram_group_id, topic_id);
-    }
-    if (qq_group_id.empty()) {
-      co_return false;
-    }
+    const auto &qq_group_id = route->target_group;
     if (invocation.name == "recall") {
       co_await runtime->second->telegram_handler->handle_recall_command(
           *event, qq_group_id);
@@ -489,14 +500,8 @@ auto BridgeForwardingRuntime::handle_command(
 
   if (invocation.source_platform == "qq" &&
       invocation.name == "bridge_status") {
-    const auto [telegram_group_id, topic_id] =
-        pair.tg_group_and_topic_id(*event->group_id);
-    (void)topic_id;
-    if (telegram_group_id.empty()) {
-      co_return false;
-    }
     co_await runtime->second->qq_handler->handle_bridge_status_command(
-        *event, telegram_group_id);
+        *event, route->target_group);
     co_return true;
   }
   co_return false;

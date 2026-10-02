@@ -1,0 +1,97 @@
+[
+  {
+    "source": "openspec/specs/actor-command-routing/spec.md",
+    "sha256": "1dcb44a8696e2b6fb0f07853862a7a5e50a52844d785402f100a8620a5526dcd",
+    "snapshot": "openspec/history/2026-09-30-core-ownership/originals/openspec/specs/actor-command-routing/spec.md"
+  },
+  {
+    "source": "openspec/specs/http-curl-asio-transport/spec.md",
+    "sha256": "3fe586a1b57d9aac889b6da0fcbb26a4b63dc08ff44702a5bc750d1180609203",
+    "snapshot": "openspec/history/2026-09-30-core-ownership/originals/openspec/specs/http-curl-asio-transport/spec.md"
+  },
+  {
+    "source": "openspec/changes/support-bridge-multi-installation-pairs/.openspec.yaml",
+    "sha256": "ec0accf47d569b8f60d01e96573f6813f1f2b7d5f135a60e3fc07159f84e74c8",
+    "snapshot": "openspec/history/2026-09-30-core-ownership/originals/openspec/changes/support-bridge-multi-installation-pairs/.openspec.yaml"
+  },
+  {
+    "source": "openspec/changes/support-bridge-multi-installation-pairs/design.md",
+    "sha256": "cf70e81d0ef1973ea1922e7ed96874d014a3421e13438891c6c212766e95d27b",
+    "snapshot": "openspec/history/2026-09-30-core-ownership/originals/openspec/changes/support-bridge-multi-installation-pairs/design.md"
+  },
+  {
+    "source": "openspec/changes/support-bridge-multi-installation-pairs/proposal.md",
+    "sha256": "6df8da6f7bc74aba486c3e3ae74cc8847be3100d2ac2061f281c0d47678fe7d6",
+    "snapshot": "openspec/history/2026-09-30-core-ownership/originals/openspec/changes/support-bridge-multi-installation-pairs/proposal.md"
+  },
+  {
+    "source": "openspec/changes/support-bridge-multi-installation-pairs/tasks.md",
+    "sha256": "dfc4249270f527f9f6f6b49eb75500763f2b0246a48aac7738a744ac8e82b20a",
+    "snapshot": "openspec/history/2026-09-30-core-ownership/originals/openspec/changes/support-bridge-multi-installation-pairs/tasks.md"
+  },
+  {
+    "source": "openspec/changes/archive/2026-09-27-share-actor-command-availability/.openspec.yaml",
+    "sha256": "65ff9df577b54daf8b21917c880c564135cf80d9e6a2de690feb0f4a842393f1",
+    "snapshot": "openspec/history/2026-09-30-core-ownership/originals/openspec/changes/archive/2026-09-27-share-actor-command-availability/.openspec.yaml"
+  },
+  {
+    "source": "openspec/changes/archive/2026-09-27-share-actor-command-availability/proposal.md",
+    "sha256": "581c1656afdd269a8350435f30259285802ef908d31b823fafeef167189e1bfd",
+    "snapshot": "openspec/history/2026-09-30-core-ownership/originals/openspec/changes/archive/2026-09-27-share-actor-command-availability/proposal.md"
+  },
+  {
+    "source": "openspec/changes/archive/2026-09-27-share-actor-command-availability/design.md",
+    "sha256": "6f1c98187eac7252de172fd04266cbd7d4c8dfb4c1f50e913a4da99b6cbcf62b",
+    "snapshot": "openspec/history/2026-09-30-core-ownership/originals/openspec/changes/archive/2026-09-27-share-actor-command-availability/design.md"
+  },
+  {
+    "source": "openspec/changes/archive/2026-09-27-share-actor-command-availability/tasks.md",
+    "sha256": "e4f1841c7f4c1ec72a12352391765b6b6a64ef61de4ee813679db3ec93bca393",
+    "snapshot": "openspec/history/2026-09-30-core-ownership/originals/openspec/changes/archive/2026-09-27-share-actor-command-availability/tasks.md"
+  },
+  {
+    "source": "openspec/changes/archive/2026-09-27-share-actor-command-availability/implementation.md",
+    "sha256": "c1417b0757df893ccbd864fe0e3a3c966097fcd8862a5aa60b71e400b1ebb162",
+    "snapshot": "openspec/history/2026-09-30-core-ownership/originals/openspec/changes/archive/2026-09-27-share-actor-command-availability/implementation.md"
+  },
+  {
+    "source": "openspec/changes/archive/2026-09-27-share-actor-command-availability/specs/actor-command-routing/spec.md",
+    "sha256": "97d0e089e16fffc19d87a4b8eb3c48b8edb471841814769a47f0a1a84fea36eb",
+    "snapshot": "openspec/history/2026-09-30-core-ownership/originals/openspec/changes/archive/2026-09-27-share-actor-command-availability/specs/actor-command-routing/spec.md"
+  },
+  {
+    "source": "openspec/changes/archive/2026-09-27-share-actor-command-availability/specs/actor-command-availability/spec.md",
+    "sha256": "39eae0377bd8421311b487cc5f4fe077c12edb7282325d5fb443e0b874c4806a",
+    "snapshot": "openspec/history/2026-09-30-core-ownership/originals/openspec/changes/archive/2026-09-27-share-actor-command-availability/specs/actor-command-availability/spec.md"
+  },
+  {
+    "source": "openspec/changes/archive/2026-09-27-share-actor-command-availability/specs/actor-abi-v2/spec.md",
+    "sha256": "df41044c1480c737097a6a44c56666a671a42278f64cc3c2f995aea503cb8ec0",
+    "snapshot": "openspec/history/2026-09-30-core-ownership/originals/openspec/changes/archive/2026-09-27-share-actor-command-availability/specs/actor-abi-v2/spec.md"
+  },
+  {
+    "source": "openspec/changes/archive/2026-09-17-fix-http-executor-shutdown-lifetime/.openspec.yaml",
+    "sha256": "7ee91ca1618f6c409dd39de4c067d96a831da3cf7b53c10100da526527e71305",
+    "snapshot": "openspec/history/2026-09-30-core-ownership/originals/openspec/changes/archive/2026-09-17-fix-http-executor-shutdown-lifetime/.openspec.yaml"
+  },
+  {
+    "source": "openspec/changes/archive/2026-09-17-fix-http-executor-shutdown-lifetime/design.md",
+    "sha256": "f94904f09cec1d7351edf87514da037aaca55347e45f3b90970dd4d07673d4a5",
+    "snapshot": "openspec/history/2026-09-30-core-ownership/originals/openspec/changes/archive/2026-09-17-fix-http-executor-shutdown-lifetime/design.md"
+  },
+  {
+    "source": "openspec/changes/archive/2026-09-17-fix-http-executor-shutdown-lifetime/proposal.md",
+    "sha256": "1f2b49450c94d0b921914e829ba8ce5a6bc640e27a0dfe157ee68f4e0882232e",
+    "snapshot": "openspec/history/2026-09-30-core-ownership/originals/openspec/changes/archive/2026-09-17-fix-http-executor-shutdown-lifetime/proposal.md"
+  },
+  {
+    "source": "openspec/changes/archive/2026-09-17-fix-http-executor-shutdown-lifetime/tasks.md",
+    "sha256": "cfaa04ce48f47e9daa65173c5a1d3d697ee9e1d05bc2ea6172f7e7b301f4330b",
+    "snapshot": "openspec/history/2026-09-30-core-ownership/originals/openspec/changes/archive/2026-09-17-fix-http-executor-shutdown-lifetime/tasks.md"
+  },
+  {
+    "source": "openspec/changes/archive/2026-09-17-fix-http-executor-shutdown-lifetime/specs/http-curl-asio-transport/spec.md",
+    "sha256": "14be53ea0c5c00fd39e991495bd2b4ed72c3ab3e6a7ff142afc63e52e3d1974a",
+    "snapshot": "openspec/history/2026-09-30-core-ownership/originals/openspec/changes/archive/2026-09-17-fix-http-executor-shutdown-lifetime/specs/http-curl-asio-transport/spec.md"
+  }
+]

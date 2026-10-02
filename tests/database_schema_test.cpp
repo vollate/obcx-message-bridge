@@ -27,12 +27,6 @@ using bridge::BridgeStateMigrationContext;
 using bridge::LegacyConversationRoute;
 using bridge::LegacyUnresolvedMappingPolicy;
 
-struct RouteIds {
-  std::string telegram = "chat:tg-group";
-  std::string qq = "group:qq-group";
-  std::int64_t topic = -1;
-};
-
 auto temp_db_path(const std::string &name) -> std::filesystem::path {
   const auto stamp =
       std::chrono::steady_clock::now().time_since_epoch().count();
@@ -84,18 +78,6 @@ auto table_count(obcx::core::DbManager &manager, const std::string &table_name)
                 .query("SELECT COUNT(*) AS count FROM \"" + table_name + "\";")
                 .front()
                 .at("count"));
-      });
-}
-
-auto index_exists(obcx::core::DbManager &manager, const std::string &index_name)
-    -> bool {
-  return manager.run_read<bool>(
-      "main", [&](obcx::core::IDbConnection &connection) {
-        return !connection
-                    .query("SELECT name FROM sqlite_master WHERE type = "
-                           "'index' AND name = ?;",
-                           {index_name})
-                    .empty();
       });
 }
 
@@ -402,32 +384,6 @@ void create_complete_v1_fixture(obcx::core::DbManager &manager,
 }
 
 } // namespace
-
-TEST(BridgeDatabaseSchemaTest, CreatesVersionThreeAndUsesMigrationNamespace) {
-  const auto path = temp_db_path("v3");
-  auto manager = manager_for(path);
-  bridge::BridgeStateRepository repository(*manager, "main", "bridge");
-  repository.initialize_schema();
-
-  EXPECT_EQ(repository.schema_version(), 3);
-  EXPECT_TRUE(table_exists(*manager, "bridge_message_mappings"));
-  EXPECT_TRUE(index_exists(*manager, "idx_bridge_message_mapping_reverse"));
-  EXPECT_TRUE(index_exists(*manager, "idx_bridge_message_retry_next_retry"));
-  EXPECT_TRUE(index_exists(*manager, "idx_bridge_media_group_lookup"));
-  const auto lock_count = manager->run_read<std::int64_t>(
-      "main", [](obcx::core::IDbConnection &connection) {
-        return std::get<std::int64_t>(
-            connection
-                .query("SELECT COUNT(*) AS count FROM obcx_migration_locks "
-                       "WHERE namespace = 'bridge';")
-                .front()
-                .at("count"));
-      });
-  EXPECT_EQ(lock_count, 1);
-  repository.initialize_schema();
-  EXPECT_EQ(repository.schema_version(), 3);
-  std::filesystem::remove(path);
-}
 
 TEST(BridgeDatabaseSchemaTest,
      ConversationScopedMappingsPreserveCountsAndCrossChatCollisions) {

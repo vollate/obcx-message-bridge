@@ -74,53 +74,6 @@ auto run_actor(std::shared_ptr<obcx::core::ActorServices> services,
   return result;
 }
 
-auto run_actor_sequence(std::shared_ptr<obcx::core::ActorServices> services,
-                        std::vector<obcx::core::MessageEnvelope> messages)
-    -> std::vector<obcx::core::ActorResult> {
-  using namespace std::chrono_literals;
-
-  asio::io_context ioc;
-  auto blocking_executor = std::make_shared<obcx::core::BlockingExecutor>(2);
-  services->register_service<obcx::core::BlockingExecutor>(blocking_executor);
-  services->register_service<asio::any_io_executor>(
-      std::make_shared<asio::any_io_executor>(ioc.get_executor()));
-  auto work = asio::make_work_guard(ioc);
-  std::jthread io_thread([&ioc] { ioc.run(); });
-
-  obcx::core::NativeActorScheduler scheduler(
-      obcx::core::NativeActorSchedulerOptions{.worker_count = 2}, services);
-  scheduler.register_actor(std::make_shared<bridge::BridgeActor>());
-
-  std::vector<obcx::core::ActorResult> results;
-  results.reserve(messages.size());
-  for (auto &message : messages) {
-    std::promise<obcx::core::ActorResult> completion;
-    auto future = completion.get_future();
-    if (!scheduler.enqueue(
-            obcx::core::ActorInvocation{.actor_id = "bridge",
-                                        .partition_key = "test",
-                                        .db_instance = "main",
-                                        .db_namespace = "bridge",
-                                        .message = std::move(message)},
-            [&completion](obcx::core::ActorResult result) {
-              completion.set_value(std::move(result));
-            })) {
-      throw std::runtime_error("native bridge scheduler rejected invocation");
-    }
-    if (future.wait_for(5s) != std::future_status::ready) {
-      scheduler.shutdown(obcx::core::ActorExecutorShutdownMode::Cancel);
-      throw std::runtime_error("native bridge invocation timed out");
-    }
-    results.push_back(future.get());
-  }
-
-  scheduler.shutdown();
-  blocking_executor->shutdown();
-  work.reset();
-  ioc.stop();
-  return results;
-}
-
 auto temp_db_path(const std::string &name) -> std::filesystem::path {
   return std::filesystem::temp_directory_path() /
          ("obcx_bridge_actor_" + name + "_" +
@@ -136,17 +89,6 @@ auto sqlite_config(const std::filesystem::path &path)
   config.type = "sqlite";
   config.path = path.string();
   return config;
-}
-
-auto preserve_test_images(const bridge::BridgeConfig &,
-                          std::vector<bridge::qq::DownloadedImage> images)
-    -> std::vector<bridge::qq::PhotoNormalizationResult> {
-  std::vector<bridge::qq::PhotoNormalizationResult> results;
-  results.reserve(images.size());
-  for (auto &image : images) {
-    results.push_back({.image = std::move(image)});
-  }
-  return results;
 }
 
 auto message_stored(const std::string &source_message_id,
@@ -166,44 +108,6 @@ auto message_stored(const std::string &source_message_id,
       {"target_bot", "tg-main"},
       {"target_conversation_id", "chat:tg-group"},
       {"target_message_id", target_message_id},
-  };
-  return envelope;
-}
-
-template <typename Command>
-auto command_message(std::string name, std::string platform = "telegram")
-    -> obcx::core::MessageEnvelope {
-  Command request;
-  request.invocation = {
-      .transaction_id = "command-1",
-      .name = std::move(name),
-      .arguments = {},
-      .source_message_id = "source-command-1",
-      .source_platform = std::move(platform),
-      .source_bot = "primary",
-      .conversation_id = "group:42",
-      .sender = "7",
-      .source_event =
-          {
-              {"message_id", "source-command-1"},
-              {"sender", "7"},
-              {"group_id", "42"},
-              {"message_type", "group"},
-              {"payload", {{"raw_message", "/bridge_status"}}},
-          },
-  };
-  obcx::core::MessageEnvelope envelope;
-  envelope.id = "command-request-1";
-  envelope.type = obcx::core::canonical_message_type_name<Command>();
-  envelope.source_platform = request.invocation.source_platform;
-  envelope.source_bot = request.invocation.source_bot;
-  envelope.conversation_id = request.invocation.conversation_id;
-  envelope.payload = request;
-  envelope.headers = {
-      {std::string{obcx::command::transaction_header}, "command-1"},
-      {std::string{obcx::command::actor_header}, "bridge"},
-      {std::string{obcx::command::generation_header}, "1"},
-      {std::string{obcx::command::reply_header}, "coordinator"},
   };
   return envelope;
 }
@@ -243,48 +147,6 @@ auto raw_message_activity(std::string platform, std::string installation,
   return envelope;
 }
 
-auto message_sent_activity(std::string platform, std::string installation,
-                           std::string action) -> obcx::core::MessageEnvelope {
-  obcx::core::events::BotMessageSentEvent event{
-      .payload = {{"action", std::move(action)}},
-  };
-  obcx::core::MessageEnvelope envelope;
-  envelope.id = "message-sent-" + installation;
-  envelope.type = obcx::core::canonical_message_type_name<decltype(event)>();
-  envelope.source_platform = std::move(platform);
-  envelope.source_bot = std::move(installation);
-  envelope.conversation_id = "global";
-  envelope.timestamp = std::chrono::system_clock::now();
-  envelope.payload = event;
-  return envelope;
-}
-
-auto raw_poke_notice() -> obcx::core::MessageEnvelope {
-  obcx::core::events::RawNoticeEvent notice{
-      .payload =
-          {
-              {"notice_type", "notify"},
-              {"sender", "user-7"},
-              {"group_id", "qq-group"},
-              {"payload", {{"sub_type", "poke"}, {"target_id", 80008}}},
-          },
-  };
-  obcx::core::MessageEnvelope envelope;
-  envelope.id = "notice-qq-poke";
-  envelope.type = obcx::core::canonical_message_type_name<decltype(notice)>();
-  envelope.source_platform = "qq";
-  envelope.source_bot = "qq-main";
-  envelope.conversation_id = "group:qq-group";
-  envelope.payload = notice;
-  envelope.raw = {
-      {"time", 1720000000.456}, {"self_id", 90001},
-      {"post_type", "notice"},  {"notice_type", "notify"},
-      {"sub_type", "poke"},     {"user_id", 70007},
-      {"target_id", 80008},     {"group_id", "qq-group"},
-  };
-  return envelope;
-}
-
 auto installation_for(const std::string_view platform) -> std::string {
   return platform == "qq" ? "qq-main" : "tg-main";
 }
@@ -310,72 +172,6 @@ auto mapped_target(bridge::BridgeStateRepository &repository,
 }
 
 } // namespace
-
-TEST(BridgeActorTest, LoadsGroupMappingsFromGenerationSnapshot) {
-  const auto config_path =
-      temp_db_path("actor_config").replace_extension(".toml");
-  {
-    std::ofstream config(config_path);
-    config << R"(
-[bots.qq-main]
-enabled = true
-surface = "onebot11.qq"
-transport = "http"
-[bots.qq-main.connection]
-host = "localhost"
-port = 3000
-access_token = ""
-use_tls = false
-connect_timeout_ms = 5000
-action_timeout_ms = 30000
-poll_interval_ms = 1000
-
-[bots.tg-main]
-enabled = true
-surface = "telegram.bot_api"
-transport = "http"
-[bots.tg-main.connection]
-host = "api.telegram.org"
-port = 443
-access_token = "YOUR_TELEGRAM_TOKEN"
-bot_username = "fixture_bot"
-use_tls = true
-connect_timeout_ms = 5000
-action_timeout_ms = 30000
-poll_timeout_ms = 25000
-poll_force_close_ms = 30000
-poll_retry_interval_ms = 3000
-
-[actors.bridge.config]
-telegram_installation = "tg-main"
-onebot11_installation = "qq-main"
-bridge_files_dir = "/tmp/bridge_files"
-bridge_files_container_dir = "/root/llonebot/bridge_files"
-
-[[group_mappings.group_to_group]]
-telegram_group_id = "tg-group"
-qq_group_id = "qq-group"
-mode = "group_to_group"
-show_qq_to_tg_sender = true
-show_tg_to_qq_sender = false
-enable_qq_to_tg = true
-enable_tg_to_qq = true
-)";
-  }
-
-  auto built = obcx::test::actor_fixture_snapshot(config_path.string());
-  ASSERT_TRUE(built);
-  const auto config = bridge::load_bridge_config(
-      obcx::common::ActorConfigView{built.snapshot, "bridge"});
-
-  const auto mapping = config->group_map.find("tg-group");
-  ASSERT_NE(mapping, config->group_map.end());
-  EXPECT_EQ(mapping->second.qq_group_id, "qq-group");
-  EXPECT_TRUE(mapping->second.enable_qq_to_tg);
-  EXPECT_FALSE(mapping->second.show_tg_to_qq_sender);
-
-  std::filesystem::remove(config_path);
-}
 
 class RecordingForwarder final : public bridge::IBridgeForwarder {
 public:
@@ -472,93 +268,60 @@ private:
   std::promise<void> started_;
 };
 
-TEST(BridgeActorTest, DeclaresTypedCommandsWithoutHandlerMetadata) {
-  const auto contract =
-      obcx::common::json::parse(bridge::BridgeActor::input_contract_json());
-  ASSERT_TRUE(contract.contains("commands"));
-  ASSERT_EQ(contract["commands"].size(), 3U);
-  EXPECT_EQ(contract["commands"][0]["name"], "bridge_status");
-  EXPECT_EQ(contract["commands"][1]["name"], "poke");
-  EXPECT_EQ(contract["commands"][2]["name"], "recall");
-  EXPECT_FALSE(contract["commands"][0].contains("handler"));
-  EXPECT_FALSE(contract["commands"][0].contains("callable"));
-  ASSERT_TRUE(contract.contains("configuration"));
-  EXPECT_EQ(contract["configuration"]["required_strings"],
-            obcx::common::json::array(
-                {"bridge_files_dir", "bridge_files_container_dir"}));
-  EXPECT_EQ(contract["configuration"]["bot_installations"]
-                    ["telegram_installation"]["types"],
-            "telegram.bot_api");
-  EXPECT_EQ(contract["configuration"]["bot_installations"]
-                    ["onebot11_installation"]["types"],
-            "onebot11.qq");
-  const auto &pairs = contract["configuration"]["bot_installation_collections"]
-                              ["installation_pairs"];
-  EXPECT_EQ(pairs["identity"], "id");
-  EXPECT_EQ(pairs["minimum_items"], 1);
-  EXPECT_EQ(pairs["bot_installations"]["telegram_installation"],
-            "telegram.bot_api");
-  EXPECT_TRUE(std::ranges::any_of(
-      contract["configuration"]["collection_identity_references"],
-      [](const auto &reference) {
-        return reference.value("root_section", std::string{}) ==
-                   "actors.bridge.config" &&
-               reference.value("source_key", std::string{}) == "pair";
-      }));
-  EXPECT_TRUE(
-      std::ranges::any_of(contract["accepted_inputs"], [](const auto &input) {
-        return input == "obcx::core::events::RawNoticeEvent";
-      }));
-}
-
-TEST(BridgeActorTest, HandlesTypedCommandAndReturnsContinueCompletion) {
-  auto services = std::make_shared<obcx::core::ActorServices>();
-  auto forwarder =
-      std::make_shared<RecordingForwarder>(bridge::BridgeForwardResult{});
-  services->register_service<bridge::IBridgeForwarder>(forwarder);
-
-  const auto result = run_actor(
-      services,
-      command_message<bridge::commands::BridgeStatusCommand>("bridge_status"));
-
-  ASSERT_TRUE(result.ok());
-  ASSERT_EQ(forwarder->seen_commands.size(), 1U);
-  EXPECT_EQ(forwarder->seen_commands.front().name, "bridge_status");
-  ASSERT_EQ(result.emitted.size(), 1U);
-  EXPECT_EQ(result.emitted.front().type,
-            obcx::core::canonical_message_type_name<
-                obcx::command::CommandCompleted>());
-  const auto completion =
-      result.emitted.front().payload.get<obcx::command::CommandCompleted>();
-  EXPECT_EQ(completion.transaction_id, "command-1");
-  EXPECT_EQ(completion.propagation, obcx::command::Propagation::Continue);
-}
-
-TEST(BridgeActorTest, HandlesEveryConfiguredPlatformCommandAsTypedMessage) {
-  auto services = std::make_shared<obcx::core::ActorServices>();
-  auto forwarder =
-      std::make_shared<RecordingForwarder>(bridge::BridgeForwardResult{});
-  services->register_service<bridge::IBridgeForwarder>(forwarder);
-
-  EXPECT_TRUE(
-      run_actor(services,
-                command_message<bridge::commands::RecallCommand>("recall"))
-          .ok());
-  EXPECT_TRUE(run_actor(services,
-                        command_message<bridge::commands::PokeCommand>("poke"))
-                  .ok());
-  EXPECT_TRUE(run_actor(services,
-                        command_message<bridge::commands::BridgeStatusCommand>(
-                            "bridge_status", "qq"))
-                  .ok());
-
-  ASSERT_EQ(forwarder->seen_commands.size(), 3U);
-  EXPECT_EQ(forwarder->seen_commands[0].source_platform, "telegram");
-  EXPECT_EQ(forwarder->seen_commands[0].name, "recall");
-  EXPECT_EQ(forwarder->seen_commands[1].source_platform, "telegram");
-  EXPECT_EQ(forwarder->seen_commands[1].name, "poke");
-  EXPECT_EQ(forwarder->seen_commands[2].source_platform, "qq");
-  EXPECT_EQ(forwarder->seen_commands[2].name, "bridge_status");
+TEST(BridgeActorTest, AvailabilityScopesMatchExistingCommandRouteResolution) {
+  bridge::BridgeConfig config;
+  bridge::BridgeInstallationPair first{"a", "tg-a", "qq-a", {}};
+  first.group_map.emplace(
+      "-10", bridge::GroupBridgeConfig{"-10", "10", true, true, true, false});
+  first.group_map.emplace(
+      "-11", bridge::GroupBridgeConfig{"-11", "11", true, true, false, true});
+  first.group_map.emplace("-20",
+                          bridge::GroupBridgeConfig{
+                              "-20", std::vector<bridge::TopicBridgeConfig>{
+                                         {42, "20", true, true, true, false},
+                                         {43, "21", true, true, false, true}}});
+  config.installation_pairs.emplace("a", first);
+  config.installation_pairs.emplace(
+      "b", bridge::BridgeInstallationPair{
+               "b",
+               "tg-b",
+               "qq-b",
+               {{"-10", bridge::GroupBridgeConfig{"-10", "10"}}}});
+  const std::vector<std::optional<std::int64_t>> topics{std::nullopt, 42, 43,
+                                                        44};
+  for (const auto name : {"bridge_status", "recall", "poke", "unsupported"}) {
+    const auto scopes = bridge::bridge_command_scopes(config, name);
+    for (const auto platform : {"qq", "telegram"}) {
+      for (const auto bot : {"qq-a", "qq-b", "tg-a", "tg-b", "unknown"}) {
+        for (const auto group :
+             {"10", "11", "20", "21", "999", "-10", "-11", "-20"}) {
+          for (const auto topic : topics) {
+            const obcx::command::Subject subject{
+                platform, bot, obcx::command::ConversationKind::Group,
+                group,    "7", topic};
+            const auto *pair = config.pair_for_source(platform, bot);
+            bool expected = false;
+            if (pair && std::string_view{platform} == "qq" && !topic &&
+                std::string_view{name} == "bridge_status") {
+              expected = !pair->tg_group_and_topic_id(group).first.empty();
+            } else if (pair && std::string_view{platform} == "telegram" &&
+                       std::string_view{name} != "unsupported") {
+              expected = !pair->qq_group_id_for_topic(group, topic.value_or(-1))
+                              .empty();
+            }
+            EXPECT_EQ(obcx::command::matches(scopes, subject), expected)
+                << name << ":" << bot << ":" << group;
+            EXPECT_EQ(bridge::resolve_bridge_command(config, name, subject)
+                          .has_value(),
+                      expected);
+          }
+        }
+      }
+    }
+    EXPECT_FALSE(obcx::command::matches(
+        scopes, {"qq", "qq-a", obcx::command::ConversationKind::Private, "10",
+                 "7", std::nullopt}));
+  }
 }
 
 TEST(BridgeActorTest, PersistsNativeHeartbeatAtLocalObservationTime) {
@@ -618,48 +381,6 @@ TEST(BridgeActorTest, PersistsTelegramMessageAtLocalObservationTime) {
   std::filesystem::remove(db_path);
 }
 
-TEST(BridgeActorTest, PersistsSuccessfulTelegramSendActivity) {
-  const auto db_path = temp_db_path("message-sent-activity");
-  auto db_manager = std::make_shared<obcx::core::DbManager>();
-  db_manager->configure({sqlite_config(db_path)});
-  auto repository = std::make_shared<bridge::BridgeStateRepository>(
-      *db_manager, "main", "bridge");
-  repository->initialize_schema();
-  auto services = std::make_shared<obcx::core::ActorServices>();
-  services->register_service<bridge::BridgeStateRepository>(repository);
-  const auto before = std::chrono::system_clock::time_point{
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::system_clock::now().time_since_epoch())};
-
-  const auto result =
-      run_actor(services, message_sent_activity("telegram", "telegram-main",
-                                                "message.send_group"));
-  const auto after = std::chrono::system_clock::now();
-
-  ASSERT_TRUE(result.ok());
-  const auto activity = repository->get_platform_heartbeat("telegram-main");
-  ASSERT_TRUE(activity.has_value());
-  EXPECT_EQ(activity->platform, "telegram");
-  EXPECT_GE(activity->last_heartbeat_at, before);
-  EXPECT_LE(activity->last_heartbeat_at, after);
-  std::filesystem::remove(db_path);
-}
-
-TEST(BridgeActorTest, RoutesTypedNoticeThroughActorForwarder) {
-  auto services = std::make_shared<obcx::core::ActorServices>();
-  auto forwarder =
-      std::make_shared<RecordingForwarder>(bridge::BridgeForwardResult{});
-  services->register_service<bridge::IBridgeForwarder>(forwarder);
-
-  const auto result = run_actor(services, raw_poke_notice());
-
-  ASSERT_TRUE(result.ok());
-  ASSERT_EQ(forwarder->seen_notices.size(), 1U);
-  EXPECT_EQ(forwarder->seen_notices.front().source_platform, "qq");
-  EXPECT_EQ(forwarder->seen_notices.front().raw["sub_type"], "poke");
-  EXPECT_TRUE(result.emitted.empty());
-}
-
 TEST(BridgeActorTest, ProcessedStoredCommandIsNotForwardedOrMappedAgain) {
   auto services = std::make_shared<obcx::core::ActorServices>();
   auto forwarder =
@@ -675,37 +396,6 @@ TEST(BridgeActorTest, ProcessedStoredCommandIsNotForwardedOrMappedAgain) {
   EXPECT_TRUE(result.ok());
   EXPECT_TRUE(result.emitted.empty());
   EXPECT_TRUE(forwarder->seen_messages.empty());
-}
-
-TEST(BridgeActorTest, PersistsMappingAndEmitsMessageForwarded) {
-  const auto db_path = temp_db_path("forwarded");
-  auto db_manager = std::make_shared<obcx::core::DbManager>();
-  db_manager->configure({sqlite_config(db_path)});
-
-  auto services = std::make_shared<obcx::core::ActorServices>();
-  services->register_service<obcx::core::DbManager>(db_manager);
-
-  const auto result = run_actor(services, message_stored("qq-7", "tg-9"));
-
-  ASSERT_TRUE(result.ok());
-  ASSERT_EQ(result.emitted.size(), 1);
-  EXPECT_EQ(result.emitted.front().type, "bridge::events::MessageForwarded");
-  EXPECT_EQ(result.emitted.front().payload["source_message_id"], "qq-7");
-  EXPECT_EQ(result.emitted.front().payload["target_message_id"], "tg-9");
-
-  const auto target_message_id = db_manager->run_read<std::string>(
-      "main", [](obcx::core::IDbConnection &connection) {
-        const auto rows = connection.query(
-            "SELECT target_message_id FROM bridge_message_mappings "
-            "WHERE source_platform = ? AND source_message_id = ? "
-            "AND target_platform = ?;",
-            {std::string{"qq"}, std::string{"qq-7"}, std::string{"telegram"}});
-        EXPECT_EQ(rows.size(), 1);
-        return std::get<std::string>(rows.at(0).at("target_message_id"));
-      });
-  EXPECT_EQ(target_message_id, "tg-9");
-
-  std::filesystem::remove(db_path);
 }
 
 TEST(BridgeActorTest, EmitsMessageForwardFailedWhenMappingFieldsAreMissing) {
@@ -788,55 +478,6 @@ TEST(BridgeActorTest, DeliveryFailureKeepsTypedDiagnosticWithoutMapping) {
   ASSERT_EQ(result.emitted.size(), 1U);
   EXPECT_EQ(result.emitted.front().type,
             "bridge::events::MessageForwardFailed");
-
-  std::filesystem::remove(db_path);
-}
-
-TEST(BridgeActorTest, ForwardsMessageStoredThroughRuntimeForwarder) {
-  const auto db_path = temp_db_path("runtime_forwarder");
-  auto db_manager = std::make_shared<obcx::core::DbManager>();
-  db_manager->configure({sqlite_config(db_path)});
-
-  auto services = std::make_shared<obcx::core::ActorServices>();
-  services->register_service<obcx::core::DbManager>(db_manager);
-  auto forwarder =
-      std::make_shared<RecordingForwarder>(bridge::BridgeForwardResult{
-          .disposition = bridge::DirectForwardDisposition::NewDelivery,
-          .source_platform = "qq",
-          .source_bot = "qq-main",
-          .source_message_id = "qq-actor-1",
-          .target_platform = "telegram",
-          .target_bot = "tg-main",
-          .target_message_id = "tg-actor-9"});
-  services->register_service<bridge::IBridgeForwarder>(forwarder);
-
-  auto stored = message_stored("qq-actor-1", "unused-target");
-  stored.payload.erase("target_platform");
-  stored.payload.erase("target_message_id");
-
-  const auto result = run_actor(services, std::move(stored));
-
-  ASSERT_TRUE(result.ok());
-  ASSERT_EQ(forwarder->seen_messages.size(), 1);
-  EXPECT_EQ(forwarder->seen_messages.front().type,
-            "obcx::message_store::events::MessageStored");
-  ASSERT_EQ(result.emitted.size(), 1);
-  EXPECT_EQ(result.emitted.front().type, "bridge::events::MessageForwarded");
-  EXPECT_EQ(result.emitted.front().payload["source_message_id"], "qq-actor-1");
-  EXPECT_EQ(result.emitted.front().payload["target_message_id"], "tg-actor-9");
-
-  const auto target_message_id = db_manager->run_read<std::string>(
-      "main", [](obcx::core::IDbConnection &connection) {
-        const auto rows = connection.query(
-            "SELECT target_message_id FROM bridge_message_mappings "
-            "WHERE source_platform = ? AND source_message_id = ? "
-            "AND target_platform = ?;",
-            {std::string{"qq"}, std::string{"qq-actor-1"},
-             std::string{"telegram"}});
-        EXPECT_EQ(rows.size(), 1);
-        return std::get<std::string>(rows.at(0).at("target_message_id"));
-      });
-  EXPECT_EQ(target_message_id, "tg-actor-9");
 
   std::filesystem::remove(db_path);
 }

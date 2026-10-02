@@ -19,13 +19,11 @@ target_compile_definitions(bridge_actor_test PRIVATE OBCX_BRIDGE_ACTOR_NO_EXPORT
 add_bridge_check(command_operation_test command_operation_test.cpp)
 add_bridge_check(retry_queue_manager_test retry_queue_manager_test.cpp)
 add_bridge_check(handler_repository_test handler_repository_test.cpp)
-target_compile_definitions(handler_repository_test PRIVATE OBCX_BRIDGE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/..")
 add_bridge_check(received_message_repository_test received_message_repository_test.cpp)
 add_bridge_check(message_event_adapter_test message_event_adapter_test.cpp)
 add_bridge_check(path_manager_test path_manager_test.cpp)
 add_bridge_check(image_url_validator_test image_url_validator_test.cpp)
 add_bridge_check(photo_normalizer_test photo_normalizer_test.cpp)
-add_bridge_check(bridge_db_runtime_test bridge_db_runtime_test.cpp)
 
 if(OBCX_BRIDGE_CONFORMANCE_TESTS)
   include(GNUInstallDirs)

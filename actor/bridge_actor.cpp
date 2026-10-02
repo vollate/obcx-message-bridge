@@ -168,7 +168,16 @@ auto BridgeActor::resolve_config(obcx::core::ActorContext &context)
 auto BridgeActor::prepare_generation(obcx::core::ActorContext &context)
     -> obcx::core::ActorPreparationResult {
   try {
-    (void)resolve_config(context);
+    const auto config = resolve_config(context);
+    const auto publisher =
+        context.get_service<obcx::command::AvailabilityPublisher>();
+    if (!publisher) {
+      return obcx::core::ActorPreparationResult::failed(
+          "bridge command availability publisher is unavailable");
+    }
+    for (const auto name : {"bridge_status", "recall", "poke"}) {
+      publisher->publish(name, bridge_command_scopes(*config, name));
+    }
     const auto generation =
         context.get_service<obcx::core::ActorGenerationInfo>();
     if (generation && generation->purpose ==
