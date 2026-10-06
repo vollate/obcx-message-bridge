@@ -3,6 +3,6 @@ package = { "id" = "vollate.bridge", "name" = "bridge", "version" = "0.2.0", "ki
 actor = { "name" = "bridge", "abi" = 2, "entrypoint" = "obcx_create_actor_v2", "input_contract_schema" = 2 }
 artifact = { "kind" = "shared-library", "name" = "bridge", "target" = "bridge_actor", "export_target" = "obcx::bridge_actor", "platforms" = ["linux-x86_64", "linux-arm64"] }
 dependencies = { "libraries" = [{ "id" = "obcx.path-mapping", "version" = ">=0.1.0,<0.2.0", "target" = "obcx::path_mapping", "visibility" = "private" }], "actors" = [{ "id" = "onebot-cxx.message-store", "version" = ">=0.1.0,<1.0.0" }], "system" = [{ "id" = "obcx-sdk", "version" = ">=1.1.0,<2.0.0", "targets" = ["obcx::obcx_core"], "visibility" = "private" }, { "id" = "tomlplusplus", "version" = ">=3.4.0,<4.0.0", "targets" = ["tomlplusplus::tomlplusplus"], "visibility" = "private" }] }
-test_dependencies = { "libraries" = [], "system" = [{ "id" = "gtest", "version" = ">=1.17.0,<2.0.0", "targets" = ["GTest::gtest_main"], "visibility" = "private" }] }
+test_dependencies = { "libraries" = [], "system" = [] }
 compatibility = { "cpp_standard" = 26, "compiler" = { "id" = "GNU", "version" = ">=16.1.0" }, "stdlib" = "libstdc++", "cxx11_abi" = 1, "pic" = true, "obcx" = ">=1.1.0,<2.0.0", "actor_abi_min" = 2, "actor_abi_max" = 2, "reflection_macro" = 202506 }
 publication = { "repository" = "https://github.com/vollate/obcx-message-bridge", "homepage" = "https://github.com/vollate/obcx-message-bridge", "license" = "MIT", "description" = "QQ and Telegram bidirectional bridge actor for OBCX" }

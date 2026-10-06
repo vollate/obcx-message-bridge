@@ -33,19 +33,17 @@ The supported baseline is Linux x86_64/arm64, CMake 3.30+, GCC 16.1+, C++26,
 Current development uses core's explicit v2 workspace: select `vollate.bridge`,
 bind its declared sources/providers, and configure with CMake. CMake resolves the
 current graph offline; no package lock or manual graph preparation is required.
-See core's `docs/architecture/package-cmake.md`. The workspace's `tests` profile
-selects Bridge's repository-owned tests; there is no separate test-option default.
+See core's `docs/architecture/package-cmake.md`. Use the workspace's
+`production` profile; repository test sources and build targets have been removed.
 
 ```bash
 cmake --build /path/to/OBCX/build --parallel 20
-ctest --test-dir /path/to/OBCX/build --parallel 20 --output-on-failure -L bridge
 ```
 
 A top-level installed-SDK build requires a prefix, configuration and all four
 `OBCX_PACKAGES_WORKSPACE/CACHE/MODE/STATE_DIR` values. It does not
-implicitly discover a source workspace. Expanded standalone conformance and
-release acceptance remain deferred; the existing optional pipeline/reload
-conformance sources are retained, not claimed as newly verified.
+implicitly discover a source workspace. Standalone release acceptance remains
+deferred; a successful build does not imply runtime acceptance.
 
 The installed package contains:
 
@@ -399,14 +397,6 @@ contract.
 - WebM/TGS-to-GIF conversion with size fallbacks
 - Persistent retry queues with exponential backoff
 - Group-to-group and topic-to-group mappings
-
-## Tests
-
-The repository tests cover reflected actor dispatch, mapping persistence,
-retries, message adaptation, database schema, and forwarding failure behavior.
-The OBCX cross-repository conformance test additionally installs a clean SDK,
-builds and installs bridge plus message-store, dynamically loads both actors,
-and verifies the complete pipeline and shutdown path.
 
 ## License
 
