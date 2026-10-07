@@ -904,7 +904,7 @@ auto QQMessageFormatter::process_forward_message(
             }
           } else if (msg_node.contains("content") &&
                      msg_node["content"].is_string()) {
-            // 兼容老版本 content 直接是字符串的格式
+            // OneBot content 允许使用字符串消息。
             node_content = msg_node["content"].get<std::string>();
           }
 

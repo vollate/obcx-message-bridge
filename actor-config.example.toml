@@ -62,14 +62,8 @@ db = "main"
 db_namespace = "bridge"
 
 [actors.bridge.config]
-# Named pairs are required for multi-account routing. Existing single-pair
-# deployments may instead keep telegram_installation/onebot11_installation;
-# never mix the scalar and collection forms.
-legacy_state_pair = "primary"
-# Schema-v3 migration stops on unresolved v2 mappings by default. Set this to
-# "archive" only after inspecting the migration report and accepting that the
-# archived rows cannot be used by replies, deduplication, edits, or recalls.
-legacy_unresolved_mapping_policy = "fail"
+# Every deployment requires installation_pairs and an explicit pair on routes.
+# Existing databases must already use schema v3; startup does not upgrade them.
 database_file = "bridge_bot.db"
 enable_retry_queue = true
 message_retry_max_attempts = 5
@@ -99,15 +93,6 @@ onebot11_installation = "qq_bot"
 # id = "secondary"
 # telegram_installation = "telegram_bot_2"
 # onebot11_installation = "qq_bot_2"
-
-# Migration-only history for a route removed or changed before schema v3.
-# Omit entries already represented by current group_mappings. These values are
-# ignored after version 3 is published and contain no bot credentials.
-# [[actors.bridge.config.legacy_mapping_routes]]
-# pair = "primary"
-# telegram_conversation_id = "chat:-1001234567890"
-# telegram_topic_id = -1
-# qq_conversation_id = "group:123456789"
 
 [command_runtime]
 timeout_ms = 5000

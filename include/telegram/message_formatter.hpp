@@ -29,7 +29,7 @@ public:
       const GroupBridgeConfig *bridge_config,
       const std::string &telegram_group_id,
       std::vector<obcx::common::MessageSegment> &message_to_send,
-      std::string_view pair_id = "legacy") -> void;
+      std::string_view pair_id) -> void;
 
   /**
    * @brief 处理回复消息格式化

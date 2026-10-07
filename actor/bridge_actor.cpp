@@ -139,19 +139,12 @@ auto BridgeActor::resolve_repository(obcx::core::ActorContext &context)
   const auto reload_candidate =
       generation && generation->purpose ==
                         obcx::core::ActorGenerationPurpose::ReloadCandidate;
-  std::optional<BridgeStateMigrationContext> migration;
-  if (context.config().available()) {
-    const auto config = resolve_config(context);
-    migration = config->migration_context(!reload_candidate);
-  }
   if (reload_candidate) {
     candidate->validate_schema();
   } else {
-    candidate->initialize_schema(std::move(migration));
+    candidate->initialize_schema();
   }
-  // Publish only a repository whose schema initialization committed. Keeping a
-  // failed candidate here would make the next event bypass migration and issue
-  // version-3 SQL against the still-transactionally-intact version-2 schema.
+  // Publish only a repository whose current schema has been verified.
   repository_ = std::move(candidate);
   return repository_;
 }
@@ -186,8 +179,6 @@ auto BridgeActor::prepare_generation(obcx::core::ActorContext &context)
     }
     (void)resolve_repository(context);
     return obcx::core::ActorPreparationResult::ready();
-  } catch (const BridgeSchemaMigrationRequiresRestart &error) {
-    return obcx::core::ActorPreparationResult::restart_required(error.what());
   } catch (const std::exception &error) {
     return obcx::core::ActorPreparationResult::failed(error.what());
   } catch (...) {

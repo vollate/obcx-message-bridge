@@ -46,8 +46,7 @@ class BridgeBotOperations final {
 public:
   BridgeBotOperations(std::shared_ptr<obcx::bot::BotOperationGateway> client,
                       std::string telegram_installation,
-                      std::string onebot11_installation,
-                      std::string pair_id = "legacy");
+                      std::string onebot11_installation, std::string pair_id);
 
   [[nodiscard]] auto pair_id() const noexcept -> const std::string &;
   [[nodiscard]] auto telegram_installation() const noexcept

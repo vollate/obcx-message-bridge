@@ -1,7 +1,6 @@
 #pragma once
 
 #include "bridge_message_identity.hpp"
-#include "bridge_state_migration.hpp"
 #include "bridge_storage_models.hpp"
 
 #include <core/infrastructure/db_manager.hpp>
@@ -81,8 +80,7 @@ public:
                         std::string db_instance,
                         std::string db_namespace = "bridge");
 
-  void initialize_schema(
-      std::optional<BridgeStateMigrationContext> migration = std::nullopt);
+  void initialize_schema();
   void validate_schema() const;
   [[nodiscard]] auto schema_version() const -> std::int64_t;
 

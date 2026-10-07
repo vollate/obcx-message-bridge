@@ -14,7 +14,6 @@ namespace bridge {
 namespace {
 
 constexpr std::size_t kMaxQqMediaDownloadBytes = 10U * 1024U * 1024U;
-constexpr std::string_view kLegacyPairId = "legacy";
 
 template <typename T>
 void assign_if_present(const obcx::common::ActorConfigView &view,
@@ -28,12 +27,7 @@ auto mapping_pair_id(const toml::table &table, const BridgeConfig &config)
     -> std::string {
   auto pair_id = table["pair"].value_or<std::string>("");
   if (pair_id.empty()) {
-    if (config.installation_pairs.size() != 1) {
-      throw std::runtime_error(
-          "bridge mapping pair is required when multiple installation pairs "
-          "are configured");
-    }
-    pair_id = config.installation_pairs.begin()->first;
+    throw std::runtime_error("bridge mapping requires an explicit pair");
   }
   if (!config.installation_pairs.contains(pair_id)) {
     throw std::runtime_error("bridge mapping names unknown pair: " + pair_id);
@@ -56,157 +50,37 @@ void add_group_mapping(BridgeInstallationPair &pair,
 
 void load_installation_pairs(const obcx::common::ActorConfigView &view,
                              BridgeConfig &result) {
-  auto scalar_telegram =
-      view.get_value<std::string>("telegram_installation").value_or("");
-  auto scalar_onebot =
-      view.get_value<std::string>("onebot11_installation").value_or("");
   const auto actor_config = view.get_section();
   const auto *named_pairs =
       actor_config ? (*actor_config)["installation_pairs"].as_array() : nullptr;
 
-  if (named_pairs != nullptr &&
-      (!scalar_telegram.empty() || !scalar_onebot.empty())) {
+  if (named_pairs == nullptr || named_pairs->empty()) {
     throw std::runtime_error(
-        "bridge scalar and named installation pair forms cannot be mixed");
+        "bridge installation_pairs must contain at least one explicit pair");
   }
-
-  if (named_pairs != nullptr) {
-    if (named_pairs->empty()) {
-      throw std::runtime_error(
-          "bridge installation_pairs must contain at least one pair");
-    }
-    for (const auto &item : *named_pairs) {
-      const auto *table = item.as_table();
-      if (table == nullptr) {
-        throw std::runtime_error(
-            "bridge installation_pairs entries must be tables");
-      }
-      BridgeInstallationPair pair{
-          .id = (*table)["id"].value_or<std::string>(""),
-          .telegram_installation =
-              (*table)["telegram_installation"].value_or<std::string>(""),
-          .onebot11_installation =
-              (*table)["onebot11_installation"].value_or<std::string>(""),
-      };
-      if (pair.id.empty() || pair.telegram_installation.empty() ||
-          pair.onebot11_installation.empty()) {
-        throw std::runtime_error(
-            "bridge installation pair requires non-empty id, "
-            "telegram_installation, and onebot11_installation");
-      }
-      const auto id = pair.id;
-      if (!result.installation_pairs.emplace(id, std::move(pair)).second) {
-        throw std::runtime_error("bridge contains duplicate pair id: " + id);
-      }
-    }
-  } else {
-    result.legacy_scalar_form = true;
-    if (scalar_telegram.empty() || scalar_onebot.empty()) {
-      throw std::runtime_error(
-          "bridge config requires telegram_installation and "
-          "onebot11_installation, or installation_pairs");
-    }
-    result.installation_pairs.emplace(
-        std::string{kLegacyPairId},
-        BridgeInstallationPair{
-            .id = std::string{kLegacyPairId},
-            .telegram_installation = std::move(scalar_telegram),
-            .onebot11_installation = std::move(scalar_onebot),
-        });
-  }
-
-  assign_if_present(view, "legacy_state_pair", result.legacy_state_pair);
-}
-
-auto configured_pair_id(const toml::table &table, const BridgeConfig &config,
-                        const std::string_view field) -> std::string {
-  auto pair_id = table[field].value_or<std::string>("");
-  if (pair_id.empty()) {
-    if (config.installation_pairs.size() != 1) {
-      throw std::runtime_error(
-          "bridge legacy mapping route requires pair in multi-pair mode");
-    }
-    pair_id = config.installation_pairs.begin()->first;
-  }
-  if (!config.installation_pairs.contains(pair_id)) {
-    throw std::runtime_error(
-        "bridge legacy mapping route names unknown pair: " + pair_id);
-  }
-  return pair_id;
-}
-
-auto configured_conversation(const toml::table &table,
-                             const std::string_view conversation_key,
-                             const std::string_view native_key,
-                             const std::string_view platform) -> std::string {
-  const auto conversation = table[conversation_key].value_or<std::string>("");
-  const auto native = table[native_key].value_or<std::string>("");
-  if (!conversation.empty() && !native.empty()) {
-    throw std::runtime_error(
-        "bridge legacy mapping route cannot mix conversation and group ids");
-  }
-  if (!conversation.empty()) {
-    if (!valid_conversation_id(platform, conversation)) {
-      throw std::runtime_error(
-          "bridge legacy mapping route has invalid canonical conversation");
-    }
-    return conversation;
-  }
-  if (native.empty()) {
-    throw std::runtime_error(
-        "bridge legacy mapping route requires both conversations");
-  }
-  return canonical_conversation_id(platform, native);
-}
-
-void load_migration_configuration(const obcx::common::ActorConfigView &view,
-                                  BridgeConfig &result) {
-  const auto policy =
-      view.get_value<std::string>("legacy_unresolved_mapping_policy")
-          .value_or("fail");
-  if (policy == "fail") {
-    result.legacy_unresolved_mapping_policy =
-        LegacyUnresolvedMappingPolicy::Fail;
-  } else if (policy == "archive") {
-    result.legacy_unresolved_mapping_policy =
-        LegacyUnresolvedMappingPolicy::Archive;
-  } else {
-    throw std::runtime_error(
-        "bridge legacy_unresolved_mapping_policy must be fail or archive");
-  }
-
-  const auto actor_config = view.get_section();
-  const auto *routes = actor_config
-                           ? (*actor_config)["legacy_mapping_routes"].as_array()
-                           : nullptr;
-  if (routes == nullptr) {
-    return;
-  }
-  for (const auto &item : *routes) {
+  for (const auto &item : *named_pairs) {
     const auto *table = item.as_table();
     if (table == nullptr) {
       throw std::runtime_error(
-          "bridge legacy_mapping_routes entries must be tables");
+          "bridge installation_pairs entries must be tables");
     }
-    const auto pair_id = configured_pair_id(*table, result, "pair");
-    const auto &pair = result.installation_pairs.at(pair_id);
-    const auto telegram_conversation = configured_conversation(
-        *table, "telegram_conversation_id", "telegram_group_id", "telegram");
-    const auto qq_conversation = configured_conversation(
-        *table, "qq_conversation_id", "qq_group_id", "qq");
-    const auto topic_id =
-        (*table)["telegram_topic_id"].value_or<std::int64_t>(-1);
-    if (topic_id == 0 || topic_id < -1) {
+    BridgeInstallationPair pair{
+        .id = (*table)["id"].value_or<std::string>(""),
+        .telegram_installation =
+            (*table)["telegram_installation"].value_or<std::string>(""),
+        .onebot11_installation =
+            (*table)["onebot11_installation"].value_or<std::string>(""),
+    };
+    if (pair.id.empty() || pair.telegram_installation.empty() ||
+        pair.onebot11_installation.empty()) {
       throw std::runtime_error(
-          "bridge legacy mapping route topic must be positive or -1");
+          "bridge installation pair requires non-empty id, "
+          "telegram_installation, and onebot11_installation");
     }
-    result.legacy_mapping_routes.push_back(
-        {.pair_id = pair_id,
-         .telegram_installation = pair.telegram_installation,
-         .onebot11_installation = pair.onebot11_installation,
-         .telegram_conversation_id = telegram_conversation,
-         .telegram_topic_id = topic_id,
-         .qq_conversation_id = qq_conversation});
+    const auto id = pair.id;
+    if (!result.installation_pairs.emplace(id, std::move(pair)).second) {
+      throw std::runtime_error("bridge contains duplicate pair id: " + id);
+    }
   }
 }
 
@@ -525,75 +399,6 @@ auto BridgeConfig::pair_for_source(const std::string_view source_platform,
   return nullptr;
 }
 
-auto BridgeConfig::legacy_migration_pair() const
-    -> const BridgeInstallationPair * {
-  if (legacy_scalar_form || installation_pairs.size() == 1) {
-    return installation_pairs.empty() ? nullptr
-                                      : &installation_pairs.begin()->second;
-  }
-  return legacy_state_pair.empty() ? nullptr : pair(legacy_state_pair);
-}
-
-auto BridgeConfig::migration_context(const bool allow_migration) const
-    -> BridgeStateMigrationContext {
-  BridgeStateMigrationContext context;
-  if (const auto *legacy = legacy_migration_pair()) {
-    context.pair_id = legacy->id;
-    context.telegram_installation = legacy->telegram_installation;
-    context.onebot11_installation = legacy->onebot11_installation;
-  }
-  context.unresolved_mapping_policy = legacy_unresolved_mapping_policy;
-  context.allow_legacy_migration = allow_migration;
-
-  const auto append_route = [&](LegacyConversationRoute route) {
-    const auto duplicate = std::ranges::find_if(
-        context.conversation_routes, [&](const auto &existing) {
-          return existing.telegram_installation ==
-                     route.telegram_installation &&
-                 existing.onebot11_installation ==
-                     route.onebot11_installation &&
-                 existing.telegram_conversation_id ==
-                     route.telegram_conversation_id &&
-                 existing.telegram_topic_id == route.telegram_topic_id &&
-                 existing.qq_conversation_id == route.qq_conversation_id;
-        });
-    if (duplicate == context.conversation_routes.end()) {
-      context.conversation_routes.push_back(std::move(route));
-    }
-  };
-
-  for (const auto &[pair_id, installation_pair] : installation_pairs) {
-    for (const auto &[telegram_group_id, mapping] :
-         installation_pair.group_map) {
-      if (mapping.mode == BridgeMode::GROUP_TO_GROUP) {
-        append_route(
-            {.pair_id = pair_id,
-             .telegram_installation = installation_pair.telegram_installation,
-             .onebot11_installation = installation_pair.onebot11_installation,
-             .telegram_conversation_id =
-                 telegram_conversation_id(telegram_group_id),
-             .telegram_topic_id = -1,
-             .qq_conversation_id = qq_conversation_id(mapping.qq_group_id)});
-        continue;
-      }
-      for (const auto &topic : mapping.topics) {
-        append_route(
-            {.pair_id = pair_id,
-             .telegram_installation = installation_pair.telegram_installation,
-             .onebot11_installation = installation_pair.onebot11_installation,
-             .telegram_conversation_id =
-                 telegram_conversation_id(telegram_group_id),
-             .telegram_topic_id = topic.telegram_topic_id,
-             .qq_conversation_id = qq_conversation_id(topic.qq_group_id)});
-      }
-    }
-  }
-  for (const auto &route : legacy_mapping_routes) {
-    append_route(route);
-  }
-  return context;
-}
-
 auto BridgeConfig::qq_group_id_for_topic(const std::string_view pair_id,
                                          const std::string_view tg_group_id,
                                          const int64_t topic_id) const
@@ -616,22 +421,6 @@ auto BridgeConfig::tg_group_and_topic_id(
   if (selected != nullptr) {
     return selected->tg_group_and_topic_id(qq_group_id);
   }
-  if (pair_id != kLegacyPairId) {
-    return {{}, -1};
-  }
-  for (const auto &[telegram_group_id, mapping] : group_map) {
-    if (mapping.mode == BridgeMode::GROUP_TO_GROUP) {
-      if (mapping.enable_qq_to_tg && mapping.qq_group_id == qq_group_id) {
-        return {telegram_group_id, -1};
-      }
-      continue;
-    }
-    for (const auto &topic : mapping.topics) {
-      if (topic.enable_qq_to_tg && topic.qq_group_id == qq_group_id) {
-        return {telegram_group_id, topic.telegram_topic_id};
-      }
-    }
-  }
   return {{}, -1};
 }
 
@@ -642,11 +431,7 @@ auto BridgeConfig::bridge_config(const std::string_view pair_id,
   if (selected != nullptr) {
     return selected->bridge_config(tg_group_id);
   }
-  if (pair_id != kLegacyPairId) {
-    return nullptr;
-  }
-  const auto found = group_map.find(std::string{tg_group_id});
-  return found == group_map.end() ? nullptr : &found->second;
+  return nullptr;
 }
 
 auto BridgeConfig::topic_config(const std::string_view pair_id,
@@ -674,7 +459,6 @@ auto load_bridge_config(const obcx::common::ActorConfigView &view)
   auto result = std::make_shared<BridgeConfig>();
   load_installation_pairs(view, *result);
   load_group_mappings(view, *result);
-  load_migration_configuration(view, *result);
 
   assign_if_present(view, "enable_miniapp_parsing",
                     result->enable_miniapp_parsing);
@@ -737,12 +521,6 @@ auto load_bridge_config(const obcx::common::ActorConfigView &view)
   validate_bridge_config(*result);
   validate_installation_pairs(view, *result);
 
-  if (result->installation_pairs.size() == 1) {
-    const auto &only = result->installation_pairs.begin()->second;
-    result->telegram_installation = only.telegram_installation;
-    result->onebot11_installation = only.onebot11_installation;
-    result->group_map = only.group_map;
-  }
   return result;
 }
 
@@ -780,68 +558,6 @@ void validate_bridge_config(const BridgeConfig &config) {
       throw std::runtime_error("bridge requires valid absolute media roots");
     }
     validate_pair_routes(pair);
-  }
-  if (!config.legacy_state_pair.empty() &&
-      !config.installation_pairs.contains(config.legacy_state_pair)) {
-    throw std::runtime_error("bridge legacy_state_pair names unknown pair: " +
-                             config.legacy_state_pair);
-  }
-
-  std::unordered_map<std::string, std::string> current_qq_routes;
-  std::unordered_map<std::string, std::string> current_telegram_routes;
-  for (const auto &[pair_id, pair] : config.installation_pairs) {
-    for (const auto &[telegram_group, mapping] : pair.group_map) {
-      if (mapping.mode == BridgeMode::GROUP_TO_GROUP) {
-        current_qq_routes.emplace(pair_id + "|" +
-                                      qq_conversation_id(mapping.qq_group_id),
-                                  telegram_conversation_id(telegram_group));
-        current_telegram_routes.emplace(
-            pair_id + "|" + telegram_conversation_id(telegram_group) + "|-1",
-            qq_conversation_id(mapping.qq_group_id));
-        continue;
-      }
-      for (const auto &topic : mapping.topics) {
-        current_qq_routes.emplace(pair_id + "|" +
-                                      qq_conversation_id(topic.qq_group_id),
-                                  telegram_conversation_id(telegram_group));
-        current_telegram_routes.emplace(
-            pair_id + "|" + telegram_conversation_id(telegram_group) + "|" +
-                std::to_string(topic.telegram_topic_id),
-            qq_conversation_id(topic.qq_group_id));
-      }
-    }
-  }
-
-  std::unordered_set<std::string> legacy_qq_routes;
-  std::unordered_set<std::string> legacy_telegram_routes;
-  for (const auto &route : config.legacy_mapping_routes) {
-    const auto *selected = config.pair(route.pair_id);
-    if (selected == nullptr ||
-        selected->telegram_installation != route.telegram_installation ||
-        selected->onebot11_installation != route.onebot11_installation) {
-      throw std::runtime_error(
-          "bridge legacy mapping route has inconsistent pair ownership");
-    }
-    if (!valid_conversation_id("telegram", route.telegram_conversation_id) ||
-        !valid_conversation_id("qq", route.qq_conversation_id) ||
-        route.telegram_topic_id == 0 || route.telegram_topic_id < -1) {
-      throw std::runtime_error(
-          "bridge legacy mapping route has invalid conversation scope");
-    }
-    const auto qq_key = route.pair_id + "|" + route.qq_conversation_id;
-    const auto telegram_key = route.pair_id + "|" +
-                              route.telegram_conversation_id + "|" +
-                              std::to_string(route.telegram_topic_id);
-    if (!legacy_qq_routes.insert(qq_key).second ||
-        !legacy_telegram_routes.insert(telegram_key).second) {
-      throw std::runtime_error(
-          "bridge contains duplicate legacy mapping route");
-    }
-    if (current_qq_routes.contains(qq_key) ||
-        current_telegram_routes.contains(telegram_key)) {
-      throw std::runtime_error(
-          "bridge legacy mapping route conflicts with a current route");
-    }
   }
   if (config.message_retry_max_attempts <= 0) {
     throw std::runtime_error(

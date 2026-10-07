@@ -2,8 +2,6 @@
 #include "core/actor/command_availability.hpp"
 #include "core/bot/typed_operation.hpp"
 
-#include "bridge_state_migration.hpp"
-
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -101,18 +99,6 @@ struct BridgeCommandRoute {
  */
 struct BridgeConfig final {
   std::unordered_map<std::string, BridgeInstallationPair> installation_pairs;
-  std::string legacy_state_pair;
-  std::vector<LegacyConversationRoute> legacy_mapping_routes;
-  LegacyUnresolvedMappingPolicy legacy_unresolved_mapping_policy =
-      LegacyUnresolvedMappingPolicy::Fail;
-  bool legacy_scalar_form = false;
-
-  // Compatibility projections for existing single-pair consumers and tests.
-  // Production routing resolves an explicit BridgeInstallationPair.
-  std::unordered_map<std::string, GroupBridgeConfig> group_map;
-  std::string telegram_installation;
-  std::string onebot11_installation;
-
   bool enable_miniapp_parsing = true;
   bool show_raw_json_on_parse_fail = true;
   int max_json_display_length = 2000;
@@ -147,10 +133,6 @@ struct BridgeConfig final {
   [[nodiscard]] auto pair_for_source(std::string_view source_platform,
                                      std::string_view source_installation) const
       -> const BridgeInstallationPair *;
-  [[nodiscard]] auto legacy_migration_pair() const
-      -> const BridgeInstallationPair *;
-  [[nodiscard]] auto migration_context(bool allow_migration) const
-      -> BridgeStateMigrationContext;
 
   [[nodiscard]] auto qq_group_id_for_topic(std::string_view pair_id,
                                            std::string_view tg_group_id,
