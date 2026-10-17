@@ -105,7 +105,7 @@ obcx::core::events::RawNoticeEvent -> bridge
 ```
 
 The actor declares typed observations for Telegram `recall`, `bridge_status`,
-and `poke`, plus QQ `bridge_status`. Activate them explicitly with
+`poke`, `userinfo`, `react`, and `unreact`, plus QQ `bridge_status`. Activate them explicitly with
 `[[command_runtime.routes]]`, as shown in
 [`actor-config.example.toml`](actor-config.example.toml). `/bridge_status`
 reports both installation identities, their most recent activity, and a
@@ -125,6 +125,35 @@ active `command_runtime.routes` match intercepts slash-prefixed traffic. If a me
 such as `/tp 2072 ~ 1080` has no scoped route, the command coordinator submits
 the original event to the ordinary message-store and bridge pipeline; bridge
 handlers do not reclassify it from its leading `/`.
+
+`/userinfo <QQ-ID>` queries a positive numeric QQ ID directly. Alternatively,
+reply to a message forwarded **from QQ by this bridge** with `/userinfo` to
+query its original QQ sender. An explicit ID takes precedence over a reply.
+The command is available only in mapped Telegram groups/topics and uses that
+bridge pair's OneBot11 installation. It calls the standard `get_stranger_info`
+API with `no_cache=true` and sends the QQ avatar as a photo with QQ ID,
+nickname, sex and age in its caption, replying in the same chat/topic. The
+avatar uses QQ's `q1.qlogo.cn` endpoint (standard OneBot11 does not return an
+avatar field). If Telegram cannot send the photo, the command falls back to a
+text profile reply. Reply lookup requires the original mapping and stored QQ
+message; expired, missing or ambiguous records produce an error rather than
+guessing a user. Arbitrary Telegram forwards and Telegram user IDs are not
+supported. Enable `userinfo` explicitly in the Telegram command route; no new
+actor configuration fields or database migration are required.
+
+Reply with `/react <emoji>` (for example `/react 👍`) to add the configured QQ
+bot's reaction to the mapped QQ message, in either forwarding direction. Input
+is a single UTF-8 emoji, optionally followed by a presentation selector, not a
+numeric ID. Explicit mappings take precedence; other single Unicode emoji use
+their decimal code point (`/react ㊗️` → `12951`), subject to QQ acceptance.
+Compound sequences are rejected rather than truncated. Reply with
+`/unreact <emoji>` to remove that specific reaction owned by the QQ bot, using
+the same parsing and lookup. Neither command clears other emoji or other users'
+reactions. Enable `react` and `unreact` explicitly in the Telegram command route.
+They use LLOneBot's `set_msg_emoji_like` extension with explicit true/false state;
+there is no toggle or automatic retry. Feedback retains the invocation's
+topic and reply context. See [reaction usage and CrossGram-based emoji mapping](docs/telegram-react.md)
+for explicit mappings, Unicode fallback rules, and provider limitations.
 
 For a matched bridge command, the actor returns `CommandCompleted(Continue)`,
 allowing message-store to persist the source event; the inherited

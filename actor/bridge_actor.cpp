@@ -168,7 +168,8 @@ auto BridgeActor::prepare_generation(obcx::core::ActorContext &context)
       return obcx::core::ActorPreparationResult::failed(
           "bridge command availability publisher is unavailable");
     }
-    for (const auto name : {"bridge_status", "recall", "poke"}) {
+    for (const auto name :
+         {"bridge_status", "recall", "poke", "userinfo", "react", "unreact"}) {
       publisher->publish(name, bridge_command_scopes(*config, name));
     }
     const auto generation =
@@ -241,6 +242,27 @@ auto BridgeActor::handle(const commands::BridgeStatusCommand &request,
 }
 
 auto BridgeActor::handle(const commands::PokeCommand &request,
+                         const obcx::core::MessageEnvelope &message,
+                         obcx::core::ActorContext &context)
+    -> obcx::core::ActorTask<obcx::core::ActorResult> {
+  return handle_command(request.invocation, message, context);
+}
+
+auto BridgeActor::handle(const commands::UserInfoCommand &request,
+                         const obcx::core::MessageEnvelope &message,
+                         obcx::core::ActorContext &context)
+    -> obcx::core::ActorTask<obcx::core::ActorResult> {
+  return handle_command(request.invocation, message, context);
+}
+
+auto BridgeActor::handle(const commands::ReactCommand &request,
+                         const obcx::core::MessageEnvelope &message,
+                         obcx::core::ActorContext &context)
+    -> obcx::core::ActorTask<obcx::core::ActorResult> {
+  return handle_command(request.invocation, message, context);
+}
+
+auto BridgeActor::handle(const commands::UnreactCommand &request,
                          const obcx::core::MessageEnvelope &message,
                          obcx::core::ActorContext &context)
     -> obcx::core::ActorTask<obcx::core::ActorResult> {

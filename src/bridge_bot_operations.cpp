@@ -146,14 +146,23 @@ auto BridgeBotOperations::edit_telegram_message(
 
 auto BridgeBotOperations::send_telegram_photo(
     const std::string_view group_id, std::string photo, std::string caption,
-    std::vector<obcx::telegram::bot::TelegramTextEntity> entities)
+    std::vector<obcx::telegram::bot::TelegramTextEntity> entities,
+    const std::optional<std::int64_t> topic_id,
+    std::optional<std::string> reply_to_message_id)
     -> boost::asio::awaitable<std::string> {
+  std::optional<obcx::bot::BotMessageRef> reply;
+  if (reply_to_message_id) {
+    reply = {.group = telegram_group(std::string{group_id}),
+             .native_message_id = std::move(*reply_to_message_id)};
+  }
   auto result = require(co_await obcx::bot::invoke(
       *client_, obcx::telegram::bot::SendTelegramPhotoRequest{
                     .target = telegram_group(std::string{group_id}),
                     .photo = std::move(photo),
                     .caption = std::move(caption),
-                    .caption_entities = std::move(entities)}));
+                    .caption_entities = std::move(entities),
+                    .topic_id = topic_id,
+                    .reply_to = std::move(reply)}));
   co_return result.primary().native_message_id;
 }
 
@@ -213,6 +222,16 @@ auto BridgeBotOperations::fetch_telegram_file(
                     .maximum_bytes = maximum_bytes}));
 }
 
+auto BridgeBotOperations::get_onebot11_user_info(const std::string_view user_id,
+                                                 const bool no_cache)
+    -> boost::asio::awaitable<obcx::onebot11::bot::OneBotUserInfo> {
+  co_return require(co_await obcx::bot::invoke(
+      *client_, obcx::onebot11::bot::GetOneBotUserInfoRequest{
+                    .installation = onebot11_,
+                    .user_id = std::string{user_id},
+                    .no_cache = no_cache}));
+}
+
 auto BridgeBotOperations::get_onebot11_group_member(
     const std::string_view group_id, const std::string_view user_id,
     const bool no_cache)
@@ -253,6 +272,18 @@ auto BridgeBotOperations::resolve_onebot11_private_file(
                     .user_id = std::string{user_id},
                     .file_id = std::string{file_id}}));
   co_return std::move(result.url);
+}
+
+auto BridgeBotOperations::set_onebot11_message_emoji_like(
+    const std::string_view group_id, const std::string_view message_id,
+    const std::string_view emoji_id, const bool set)
+    -> boost::asio::awaitable<void> {
+  (void)require(co_await obcx::bot::invoke(
+      *client_, obcx::onebot11::bot::SetOneBotMessageEmojiLikeRequest{
+                    .message = {.group = onebot11_group(std::string{group_id}),
+                                .native_message_id = std::string{message_id}},
+                    .emoji_id = std::string{emoji_id},
+                    .set = set}));
 }
 
 auto BridgeBotOperations::poke_onebot11_group(const std::string_view group_id,

@@ -319,7 +319,8 @@ auto BridgeInstallationPair::topic_config(const std::string_view tg_group_id,
 auto bridge_command_routes(const BridgeConfig &config,
                            const std::string_view command)
     -> std::vector<BridgeCommandRoute> {
-  if (command != "bridge_status" && command != "recall" && command != "poke") {
+  if (command != "bridge_status" && command != "recall" && command != "poke" &&
+      command != "userinfo" && command != "react" && command != "unreact") {
     return {};
   }
   std::vector<BridgeCommandRoute> routes;

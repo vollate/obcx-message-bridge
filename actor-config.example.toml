@@ -117,7 +117,7 @@ timeout_ms = 5000
 
 [[command_runtime.routes]]
 actor = "bridge"
-commands = ["recall", "bridge_status", "poke"]
+commands = ["recall", "bridge_status", "poke", "userinfo", "react", "unreact"]
 platforms = ["telegram"]
 bots = ["telegram_bot"]
 fallback = "continue"

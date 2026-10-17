@@ -82,7 +82,9 @@ public:
 
   auto send_telegram_photo(
       std::string_view group_id, std::string photo, std::string caption,
-      std::vector<obcx::telegram::bot::TelegramTextEntity> entities = {})
+      std::vector<obcx::telegram::bot::TelegramTextEntity> entities = {},
+      std::optional<std::int64_t> topic_id = std::nullopt,
+      std::optional<std::string> reply_to_message_id = std::nullopt)
       -> boost::asio::awaitable<std::string>;
   auto send_telegram_media_urls(
       std::string_view group_id,
@@ -103,6 +105,8 @@ public:
                            std::size_t maximum_bytes)
       -> boost::asio::awaitable<obcx::telegram::bot::FetchedTelegramFile>;
 
+  auto get_onebot11_user_info(std::string_view user_id, bool no_cache)
+      -> boost::asio::awaitable<obcx::onebot11::bot::OneBotUserInfo>;
   auto get_onebot11_group_member(std::string_view group_id,
                                  std::string_view user_id,
                                  bool no_cache = false)
@@ -115,6 +119,10 @@ public:
   auto resolve_onebot11_private_file(std::string_view user_id,
                                      std::string_view file_id)
       -> boost::asio::awaitable<std::string>;
+  auto set_onebot11_message_emoji_like(std::string_view group_id,
+                                       std::string_view message_id,
+                                       std::string_view emoji_id, bool set)
+      -> boost::asio::awaitable<void>;
   auto poke_onebot11_group(std::string_view group_id, std::string_view user_id)
       -> boost::asio::awaitable<void>;
 

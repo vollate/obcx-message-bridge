@@ -28,6 +28,10 @@ struct RecallCommand final : obcx::command::RequestMessage<RecallCommand> {};
 struct BridgeStatusCommand final
     : obcx::command::RequestMessage<BridgeStatusCommand> {};
 struct PokeCommand final : obcx::command::RequestMessage<PokeCommand> {};
+struct ReactCommand final : obcx::command::RequestMessage<ReactCommand> {};
+struct UnreactCommand final : obcx::command::RequestMessage<UnreactCommand> {};
+struct UserInfoCommand final : obcx::command::RequestMessage<UserInfoCommand> {
+};
 } // namespace commands
 
 class BridgeActor final : public obcx::core::ReflectedActor<BridgeActor> {
@@ -42,7 +46,17 @@ public:
                 "bridge_status", "Show Telegram and QQ bridge status")),
         obcx::command::actor_scoped(
             obcx::command::observe<commands::PokeCommand>(
-                "poke", "Poke the replied QQ user")));
+                "poke", "Poke the replied QQ user")),
+        obcx::command::actor_scoped(
+            obcx::command::observe<commands::UserInfoCommand>(
+                "userinfo", "Query QQ user info by reply or QQ ID")),
+        obcx::command::actor_scoped(
+            obcx::command::observe<commands::ReactCommand>(
+                "react", "React to the replied QQ message with an emoji")),
+        obcx::command::actor_scoped(obcx::command::observe<
+                                    commands::UnreactCommand>(
+            "unreact",
+            "Remove the bot's emoji reaction from the replied QQ message")));
   }
 
   [[nodiscard]] static auto configuration_contract() -> obcx::common::json {
@@ -115,6 +129,18 @@ public:
               obcx::core::ActorContext &context)
       -> obcx::core::ActorTask<obcx::core::ActorResult>;
   auto handle(const commands::BridgeStatusCommand &request,
+              const obcx::core::MessageEnvelope &message,
+              obcx::core::ActorContext &context)
+      -> obcx::core::ActorTask<obcx::core::ActorResult>;
+  auto handle(const commands::UserInfoCommand &request,
+              const obcx::core::MessageEnvelope &message,
+              obcx::core::ActorContext &context)
+      -> obcx::core::ActorTask<obcx::core::ActorResult>;
+  auto handle(const commands::ReactCommand &request,
+              const obcx::core::MessageEnvelope &message,
+              obcx::core::ActorContext &context)
+      -> obcx::core::ActorTask<obcx::core::ActorResult>;
+  auto handle(const commands::UnreactCommand &request,
               const obcx::core::MessageEnvelope &message,
               obcx::core::ActorContext &context)
       -> obcx::core::ActorTask<obcx::core::ActorResult>;

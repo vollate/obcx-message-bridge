@@ -491,9 +491,18 @@ auto BridgeForwardingRuntime::handle_command(
     } else if (invocation.name == "bridge_status") {
       co_await runtime->second->telegram_handler->handle_bridge_status_command(
           *event, qq_group_id);
-    } else {
+    } else if (invocation.name == "poke") {
       co_await runtime->second->telegram_handler->handle_poke_command(
           *event, qq_group_id);
+    } else if (invocation.name == "userinfo") {
+      co_await runtime->second->telegram_handler->handle_userinfo_command(
+          *event, qq_group_id, invocation.arguments);
+    } else if (invocation.name == "react" || invocation.name == "unreact") {
+      co_await runtime->second->telegram_handler->handle_reaction_command(
+          *event, qq_group_id, invocation.arguments,
+          invocation.name == "react");
+    } else {
+      co_return false;
     }
     co_return true;
   }

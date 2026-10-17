@@ -28,6 +28,7 @@ add_library(
   qq/photo_normalizer.cpp
   # telegram
   telegram/command_handler.cpp
+  telegram/reaction_emoji.cpp
   telegram/event_handler.cpp
   telegram/media_processor/animation.cpp
   telegram/media_processor/dispatch.cpp

@@ -31,6 +31,14 @@ public:
   auto handle_bridge_status_command(obcx::common::MessageEvent event,
                                     std::string_view qq_group_id)
       -> boost::asio::awaitable<void>;
+  auto handle_userinfo_command(obcx::common::MessageEvent event,
+                               std::string_view qq_group_id,
+                               std::string arguments)
+      -> boost::asio::awaitable<void>;
+  auto handle_reaction_command(obcx::common::MessageEvent event,
+                               std::string_view qq_group_id,
+                               std::string arguments, bool set)
+      -> boost::asio::awaitable<void>;
   auto handle_poke_command(obcx::common::MessageEvent event,
                            std::string_view qq_group_id)
       -> boost::asio::awaitable<void>;

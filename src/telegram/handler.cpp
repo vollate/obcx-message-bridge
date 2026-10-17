@@ -459,6 +459,23 @@ auto TelegramHandler::handle_bridge_status_command(
                                                           qq_group_id);
 }
 
+auto TelegramHandler::handle_userinfo_command(obcx::common::MessageEvent event,
+                                              std::string_view qq_group_id,
+                                              std::string arguments)
+    -> boost::asio::awaitable<void> {
+  co_await command_handler_->handle_userinfo_command(
+      std::move(event), qq_group_id, std::move(arguments));
+}
+
+auto TelegramHandler::handle_reaction_command(obcx::common::MessageEvent event,
+                                              std::string_view qq_group_id,
+                                              std::string arguments,
+                                              const bool set)
+    -> boost::asio::awaitable<void> {
+  co_await command_handler_->handle_reaction_command(
+      std::move(event), qq_group_id, std::move(arguments), set);
+}
+
 auto TelegramHandler::handle_poke_command(obcx::common::MessageEvent event,
                                           std::string_view qq_group_id)
     -> boost::asio::awaitable<void> {
