@@ -252,9 +252,9 @@ and a source conversation maps to one target rather than fan-out. Every
 Missing routes remain successful no-ops, while unknown source installations
 fail without selecting another account.
 
-All deployments use `installation_pairs`. When converting a deployment's
-configuration, preserve its existing pair identity (the former scalar form used
-`legacy`); this is an explicit configured ID, not a built-in fallback.
+All deployments use `installation_pairs` with explicit pair IDs such as
+`primary`. Each mapping's `pair` must match a configured ID; there is no
+built-in fallback.
 Command routes must list every source bot whose Bridge commands should be active.
 
 ### Execution domains and partitions
