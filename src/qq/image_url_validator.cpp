@@ -13,12 +13,10 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
-#include <charconv>
 #include <chrono>
 #include <common/logger.hpp>
-#include <map>
 #include <memory>
-#include <network/http_client.hpp>
+#include <network/image_fetch.hpp>
 #include <optional>
 #include <stdexcept>
 
@@ -28,18 +26,8 @@ namespace {
 
 namespace asio = boost::asio;
 
-constexpr unsigned int kHttpsPort = 443;
-constexpr unsigned int kHttpPort = 80;
 constexpr unsigned int kHttpStatusOk = 200;
 constexpr unsigned int kHttpStatusPartialContent = 206;
-
-struct ParsedUrl {
-  bool valid{false};
-  bool use_ssl{false};
-  std::string host;
-  std::uint16_t port{0};
-  std::string path;
-};
 
 class DownloadError : public std::runtime_error {
 public:
@@ -54,74 +42,14 @@ private:
   MediaDownloadFailure failure_;
 };
 
-auto parse_url(const std::string &url) -> ParsedUrl {
-  ParsedUrl parsed;
-  if (url.starts_with("https://")) {
-    parsed.use_ssl = true;
-  } else if (url.starts_with("http://")) {
-    parsed.use_ssl = false;
-  } else {
-    return parsed;
-  }
-
-  const std::size_t authority_start = url.find("://") + 3;
-  const std::size_t authority_end = url.find_first_of("/?#", authority_start);
-  std::string authority =
-      url.substr(authority_start, authority_end - authority_start);
-  parsed.path =
-      authority_end == std::string::npos
-          ? "/"
-          : (url[authority_end] == '/' ? url.substr(authority_end)
-                                       : "/" + url.substr(authority_end));
-
-  parsed.port = parsed.use_ssl ? kHttpsPort : kHttpPort;
-  const auto port_separator = authority.rfind(':');
-  if (port_separator != std::string::npos &&
-      authority.find(':') == port_separator) {
-    const auto port_text =
-        std::string_view{authority}.substr(port_separator + 1);
-    unsigned int port = 0;
-    const auto [end, error] = std::from_chars(
-        port_text.data(), port_text.data() + port_text.size(), port);
-    if (error != std::errc{} || end != port_text.data() + port_text.size() ||
-        port == 0 || port > 65535) {
-      return parsed;
-    }
-    authority.resize(port_separator);
-    parsed.port = static_cast<std::uint16_t>(port);
-  }
-
-  parsed.host = std::move(authority);
-  parsed.valid = !parsed.host.empty();
-  return parsed;
-}
-
-// 用 Range: bytes=0-0 探测 URL 是否可达：部分 QQ 镜像服务器对 HEAD 返回 405，
-// 但 Range: bytes=0-0 在所有常见图床上都能稳定工作，且只下载 1 字节。
-// 每次都创建临时直连 HttpClient（无代理），与 detect_gif_format 一致——
-// QQ 图片下载不应走 Telegram 代理。
-auto probe_once(const ParsedUrl &url, std::chrono::milliseconds timeout)
-    -> asio::awaitable<bool> {
-  const auto executor = co_await asio::this_coro::executor;
-
-  obcx::common::ConnectionConfig cfg;
-  cfg.host = url.host;
-  cfg.port = url.port;
-  cfg.use_ssl = url.use_ssl;
-  cfg.access_token.clear();
-  cfg.proxy_host.clear();
-  cfg.proxy_port = 0;
-  cfg.proxy_type.clear();
-  cfg.proxy_username.clear();
-  cfg.proxy_password.clear();
-
-  auto client = std::make_unique<obcx::network::HttpClient>(executor, cfg);
-  client->set_timeout(timeout);
-
-  std::map<std::string, std::string> headers;
-  headers["Range"] = "bytes=0-0";
-
-  obcx::network::HttpResponse resp = co_await client->get(url.path, headers);
+// Core owns URL parsing and direct bounded HTTP. A server may ignore Range;
+// the actor's explicit media byte limit still bounds the resulting body.
+auto probe_once(const std::string &url, std::chrono::milliseconds timeout,
+                std::size_t body_limit) -> asio::awaitable<bool> {
+  auto resp = co_await obcx::network::fetch_image({.url = url,
+                                                   .timeout = timeout,
+                                                   .maximum_bytes = body_limit,
+                                                   .prefix_bytes = 1});
   // 200 OK / 206 Partial Content 都视为可达。
   // 部分服务器忽略 Range 直接返回 200 也接受。
   co_return resp.status_code == kHttpStatusOk ||
@@ -147,33 +75,23 @@ auto extension_for_mime(std::string_view mime) -> std::string_view {
   return ".bin";
 }
 
-auto download_once(const ParsedUrl &url, std::chrono::milliseconds timeout,
+auto download_once(const std::string &url, std::chrono::milliseconds timeout,
                    std::size_t body_limit)
     -> asio::awaitable<std::pair<std::string, std::string>> {
-  const auto executor = co_await asio::this_coro::executor;
-
-  obcx::common::ConnectionConfig cfg;
-  cfg.host = url.host;
-  cfg.port = url.port;
-  cfg.use_ssl = url.use_ssl;
-  cfg.access_token.clear();
-  cfg.proxy_host.clear();
-  cfg.proxy_port = 0;
-  cfg.proxy_type.clear();
-  cfg.proxy_username.clear();
-  cfg.proxy_password.clear();
-
-  auto client = std::make_unique<obcx::network::HttpClient>(executor, cfg);
-  client->set_timeout(timeout);
-  client->set_response_body_limit(body_limit);
-
   obcx::network::HttpResponse response;
   try {
     response =
-        co_await client->get(url.path, {{"Accept-Encoding", "identity"}});
-  } catch (const obcx::network::HttpClientError &error) {
-    if (std::string_view{error.what()}.find("body limit exceeded") !=
-        std::string_view::npos) {
+        co_await obcx::network::fetch_image({.url = url,
+                                             .timeout = timeout,
+                                             .maximum_bytes = body_limit,
+                                             .prefix_bytes = std::nullopt});
+  } catch (const obcx::network::ImageFetchError &error) {
+    using obcx::network::ImageFetchFailure;
+    if (error.failure() == ImageFetchFailure::InvalidUrl) {
+      throw DownloadError(MediaDownloadFailure::InvalidUrl,
+                          "invalid media URL");
+    }
+    if (error.failure() == ImageFetchFailure::OverLimit) {
       throw DownloadError(MediaDownloadFailure::OverLimit,
                           "response exceeds configured media limit");
     }
@@ -207,21 +125,22 @@ auto probe_with_backoff(const BridgeConfig &config, std::string url,
   const auto per_attempt_timeout =
       std::chrono::milliseconds(std::max(1, config.image_url_probe_timeout_ms));
 
-  ParsedUrl parsed = parse_url(url);
-  if (!parsed.valid) {
-    fail_reason = "invalid url scheme/host";
-    co_return false;
-  }
-
   auto executor = co_await asio::this_coro::executor;
 
   for (int attempt = 0; attempt < max_attempts; ++attempt) {
     try {
-      bool ok = co_await probe_once(parsed, per_attempt_timeout);
+      bool ok = co_await probe_once(url, per_attempt_timeout,
+                                    config.qq_media_download_max_bytes);
       if (ok) {
         co_return true;
       }
       fail_reason = "probe returned non-success status";
+    } catch (const obcx::network::ImageFetchError &error) {
+      fail_reason = error.what();
+      if (error.failure() == obcx::network::ImageFetchFailure::InvalidUrl ||
+          error.failure() == obcx::network::ImageFetchFailure::InvalidLimits) {
+        co_return false;
+      }
     } catch (const std::exception &e) {
       fail_reason = e.what();
     }
@@ -359,12 +278,8 @@ auto ImageUrlValidator::download(
 
       const auto &item = media[index];
       try {
-        const auto parsed = parse_url(item.second);
-        if (!parsed.valid) {
-          throw DownloadError(MediaDownloadFailure::InvalidUrl,
-                              "invalid media URL");
-        }
-        auto [data, mime] = co_await download_once(parsed, timeout, body_limit);
+        auto [data, mime] =
+            co_await download_once(item.second, timeout, body_limit);
         results[index].image = DownloadedImage{
             .type = item.first.empty() ? "photo" : item.first,
             .original_url = item.second,

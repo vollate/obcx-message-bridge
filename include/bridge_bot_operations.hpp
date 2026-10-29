@@ -105,6 +105,9 @@ public:
                            std::size_t maximum_bytes)
       -> boost::asio::awaitable<obcx::telegram::bot::FetchedTelegramFile>;
 
+  auto resolve_onebot11_image(const obcx::common::MessageSegment &segment)
+      -> boost::asio::awaitable<std::string>;
+
   auto get_onebot11_user_info(std::string_view user_id, bool no_cache)
       -> boost::asio::awaitable<obcx::onebot11::bot::OneBotUserInfo>;
   auto get_onebot11_group_member(std::string_view group_id,

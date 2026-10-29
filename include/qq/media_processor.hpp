@@ -86,7 +86,8 @@ public:
       -> boost::asio::awaitable<obcx::common::MessageSegment>;
 
 private:
-  auto detect_gif_format(const std::string &url)
+  auto detect_gif_format(const std::string &url,
+                         const std::string &format_cache_key)
       -> boost::asio::awaitable<bool>;
   static auto is_sticker(const obcx::common::MessageSegment &segment) -> bool;
   auto handle_sticker_cache(const obcx::common::MessageSegment &segment,
@@ -101,8 +102,6 @@ private:
       -> obcx::common::MessageSegment;
   static auto extract_urls_from_json(const std::string &json_str)
       -> std::vector<std::string>;
-  static auto to_hex_string(const std::string &data, size_t max_bytes = 16)
-      -> std::string;
 
   std::shared_ptr<BridgeBotOperations> operations_;
   std::shared_ptr<const bridge::BridgeConfig> config_;

@@ -222,6 +222,26 @@ auto BridgeBotOperations::fetch_telegram_file(
                     .maximum_bytes = maximum_bytes}));
 }
 
+auto BridgeBotOperations::resolve_onebot11_image(
+    const obcx::common::MessageSegment &segment)
+    -> boost::asio::awaitable<std::string> {
+  auto image =
+      obcx::onebot11::bot::OneBotImageRef::from_segment(onebot11_, segment);
+  auto result = require(co_await obcx::bot::invoke(
+      *client_, obcx::onebot11::bot::GetOneBotImageRequest{
+                    .image = std::move(image), .download = false}));
+  if (result.url.empty()) {
+    throw BridgeBotOperationFailure(
+        {.code = obcx::bot::BotOperationErrorCode::UnsupportedAction,
+         .message =
+             "OneBot get_image did not provide a supported public image URL",
+         .retryable = false,
+         .submission_safety =
+             obcx::bot::SubmissionSafety::DefinitelyNotSubmitted});
+  }
+  co_return std::move(result.url);
+}
+
 auto BridgeBotOperations::get_onebot11_user_info(const std::string_view user_id,
                                                  const bool no_cache)
     -> boost::asio::awaitable<obcx::onebot11::bot::OneBotUserInfo> {

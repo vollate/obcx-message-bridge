@@ -223,8 +223,24 @@ onebot11_installation = "qq_bot"
 uses a PNG that shows `NOT FOUND`; the embedded image is used only if the
 configured URL cannot be downloaded or validated.
 
+Image downloads and Range probes use the core SDK's
+`network/image_fetch.hpp` (`obcx::network::fetch_image`). URL parsing and direct
+bounded HTTP acquisition live in core; Bridge retains retries, placeholders,
+format detection and normalization. A matching frozen SDK containing this API
+is required; this actor no longer maintains a private image HTTP implementation.
+Native single, album and forwarded-node images resolve through typed OneBot 11
+`get_image`, with LLOneBot's `download: false` / `url` extension. The request uses
+the image's native `file` and exact bot installation, not its original URL.
+Missing cache entries, malformed results and path-only responses take the
+existing per-item placeholder path; source URLs and server paths are not fallback
+inputs. Already cached Telegram sticker file IDs can still be reused without a
+new image lookup. URL generation remains LLOneBot's responsibility; Bridge does
+not implement a key API or assume a fixed URL lifetime.
+
 `qq_media_download_max_bytes` bounds each full QQ image downloaded after
-Telegram rejects direct URL delivery. Configure it in the range
+Telegram rejects direct URL delivery, and also bounds probe responses when a
+server ignores Range. Probe/GIF acquisition explicitly uses
+`image_url_probe_timeout_ms`. Configure the byte limit in the range
 `1..10485760`; 10 MiB is the public Telegram photo limit. A failed, expired,
 invalid, or oversized item is replaced during multipart fallback without
 discarding valid peers in the same media group.

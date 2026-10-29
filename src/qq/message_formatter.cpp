@@ -873,14 +873,10 @@ auto QQMessageFormatter::process_forward_message(
                   img_segment.type = "image";
                   if (content_seg.contains("data")) {
                     auto img_data = content_seg["data"];
-                    if (img_data.contains("url") &&
-                        img_data["url"].is_string()) {
-                      img_segment.data["url"] =
-                          img_data["url"].get<std::string>();
-                      img_segment.data["file"] =
-                          img_data["url"].get<std::string>();
-                    } else if (img_data.contains("file") &&
-                               img_data["file"].is_string()) {
+                    // Preserve the native file identifier for get_image;
+                    // a source URL is neither an identifier nor a fallback.
+                    if (img_data.contains("file") &&
+                        img_data["file"].is_string()) {
                       img_segment.data["file"] =
                           img_data["file"].get<std::string>();
                     }
@@ -889,10 +885,7 @@ auto QQMessageFormatter::process_forward_message(
                     }
                   }
                   forward_images.push_back(img_segment);
-                  OBCX_DEBUG(
-                      "收集合并转发中的图片: url={}",
-                      img_segment.data.value(
-                          "url", img_segment.data.value("file", "无URL")));
+                  OBCX_DEBUG("收集合并转发中的图片");
                 } else if (seg_type == "at" && content_seg.contains("data") &&
                            content_seg["data"].contains("qq")) {
                   node_content += fmt::format(
@@ -924,12 +917,17 @@ auto QQMessageFormatter::process_forward_message(
 
       std::vector<std::pair<std::string, std::string>> all_media;
       for (const auto &img_seg : forward_images) {
-        std::string url =
-            img_seg.data.value("url", img_seg.data.value("file", ""));
-        if (!url.empty()) {
-          all_media.emplace_back("photo", url);
-          OBCX_DEBUG("添加图片到MediaGroup: {}", url);
+        std::string url;
+        try {
+          url = co_await operations_->resolve_onebot11_image(img_seg);
+        } catch (const std::exception &error) {
+          if (is_operation_aborted(error)) {
+            throw;
+          }
+          OBCX_WARN("合并转发图片解析失败: category=get_image_failed");
         }
+        // Keep failed slots: the existing sanitizer replaces an empty URL.
+        all_media.emplace_back("photo", std::move(url));
       }
 
       if (!all_media.empty()) {
@@ -1119,12 +1117,19 @@ auto QQMessageFormatter::send_media_group(
                sent_count, batch_size);
     std::vector<std::pair<std::string, std::string>> media_list;
     for (size_t i = 0; i < batch_size; ++i) {
-      std::string url = image_segments[sent_count + i].data.value(
-          "url", image_segments[sent_count + i].data.value("file", ""));
-      if (!url.empty()) {
-        media_list.emplace_back("photo", url);
-        OBCX_DEBUG("添加图片到MediaGroup: {}", url);
+      std::string url;
+      try {
+        url = co_await operations_->resolve_onebot11_image(
+            image_segments[sent_count + i]);
+      } catch (const std::exception &error) {
+        if (is_operation_aborted(error)) {
+          throw;
+        }
+        OBCX_WARN(
+            "QQ MediaGroup 图片解析失败: index={}, category=get_image_failed",
+            sent_count + i + 1);
       }
+      media_list.emplace_back("photo", std::move(url));
     }
 
     const auto original_media_list = media_list;
