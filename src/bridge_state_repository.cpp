@@ -1,9 +1,12 @@
 #include "bridge_state_repository.hpp"
 
 #include <common/logger.hpp>
+#include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <unordered_set>
 #include <utility>
@@ -13,13 +16,13 @@ namespace bridge {
 namespace {
 
 constexpr std::string_view kSchemaTable = "bridge_schema_version";
-constexpr std::string_view kMappingsTable = "bridge_message_mappings";
-constexpr std::string_view kRetriesTable = "bridge_message_retry_queue";
-constexpr std::string_view kMediaGroupsTable = "bridge_media_group_mappings";
 constexpr std::string_view kUsersTable = "bridge_users";
 constexpr std::string_view kStickerCacheTable = "bridge_sticker_cache";
 constexpr std::string_view kQqStickerTable = "bridge_qq_sticker_mappings";
 constexpr std::string_view kHeartbeatsTable = "bridge_platform_heartbeats";
+
+void create_v4_ledger(obcx::core::IDbConnection &connection);
+void validate_v4_ledger(obcx::core::IDbConnection &connection);
 
 auto timestamp_ms(const std::chrono::system_clock::time_point &time)
     -> std::int64_t {
@@ -121,15 +124,6 @@ auto table_exists(obcx::core::IDbConnection &connection,
               .empty();
 }
 
-auto index_exists(obcx::core::IDbConnection &connection,
-                  const std::string_view index) -> bool {
-  return !connection
-              .query("SELECT name FROM sqlite_master WHERE type = 'index' "
-                     "AND name = ?;",
-                     {std::string{index}})
-              .empty();
-}
-
 void require_columns(obcx::core::IDbConnection &connection,
                      const std::string &table,
                      const std::vector<std::string> &required) {
@@ -214,18 +208,7 @@ void create_auxiliary_tables(obcx::core::IDbConnection &connection) {
   )");
 }
 
-void validate_common_columns(obcx::core::IDbConnection &connection) {
-  require_columns(connection, std::string{kMappingsTable},
-                  {"source_installation", "source_platform",
-                   "source_message_id", "target_installation",
-                   "target_platform", "target_message_id"});
-  require_columns(connection, std::string{kRetriesTable},
-                  {"source_installation", "source_platform",
-                   "target_installation", "target_platform",
-                   "source_message_id"});
-  require_columns(connection, std::string{kMediaGroupsTable},
-                  {"source_installation", "source_platform", "media_group_id",
-                   "target_installation", "target_platform"});
+void validate_auxiliary_columns(obcx::core::IDbConnection &connection) {
   require_columns(connection, std::string{kUsersTable},
                   {"installation_id", "platform", "user_id"});
   require_columns(connection, std::string{kStickerCacheTable},
@@ -241,148 +224,6 @@ void require_installation(const std::string &installation,
                           const std::string_view field) {
   if (installation.empty()) {
     throw std::invalid_argument("bridge state requires " + std::string{field});
-  }
-}
-
-void create_v3_message_tables(obcx::core::IDbConnection &connection) {
-  connection.execute(R"(
-    CREATE TABLE IF NOT EXISTS bridge_message_mappings (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      source_installation TEXT NOT NULL,
-      source_platform TEXT NOT NULL,
-      source_conversation_id TEXT NOT NULL,
-      source_message_id TEXT NOT NULL,
-      target_installation TEXT NOT NULL,
-      target_platform TEXT NOT NULL,
-      target_conversation_id TEXT NOT NULL,
-      target_message_id TEXT NOT NULL,
-      is_primary INTEGER NOT NULL DEFAULT 1 CHECK(is_primary IN (0, 1)),
-      created_at INTEGER NOT NULL,
-      UNIQUE(source_installation, source_platform, source_conversation_id,
-             source_message_id, target_installation, target_platform,
-             target_conversation_id)
-    );
-  )");
-  connection.execute(R"(
-    CREATE INDEX IF NOT EXISTS idx_bridge_message_mapping_reverse
-    ON bridge_message_mappings(
-      target_installation, target_platform, target_conversation_id,
-      target_message_id, source_installation, source_platform,
-      source_conversation_id, is_primary);
-  )");
-
-  connection.execute(R"(
-    CREATE TABLE IF NOT EXISTS bridge_message_retry_queue (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      source_installation TEXT NOT NULL,
-      source_platform TEXT NOT NULL,
-      source_conversation_id TEXT NOT NULL,
-      target_installation TEXT NOT NULL,
-      target_platform TEXT NOT NULL,
-      target_conversation_id TEXT NOT NULL,
-      source_message_id TEXT NOT NULL,
-      message_content TEXT NOT NULL,
-      group_id TEXT NOT NULL,
-      source_group_id TEXT NOT NULL,
-      target_topic_id INTEGER DEFAULT -1,
-      retry_count INTEGER NOT NULL DEFAULT 0,
-      max_retry_count INTEGER NOT NULL DEFAULT 5,
-      failure_reason TEXT,
-      retry_type TEXT NOT NULL DEFAULT 'message_send',
-      next_retry_at INTEGER NOT NULL,
-      created_at INTEGER NOT NULL,
-      last_attempt_at INTEGER NOT NULL,
-      UNIQUE(source_installation, source_platform, source_conversation_id,
-             source_message_id, target_installation, target_platform,
-             target_conversation_id)
-    );
-  )");
-  connection.execute(R"(
-    CREATE INDEX IF NOT EXISTS idx_bridge_message_retry_next_retry
-    ON bridge_message_retry_queue(next_retry_at);
-  )");
-
-  connection.execute(R"(
-    CREATE TABLE IF NOT EXISTS bridge_media_group_mappings (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      source_installation TEXT NOT NULL,
-      source_platform TEXT NOT NULL,
-      source_conversation_id TEXT NOT NULL,
-      media_group_id TEXT NOT NULL,
-      source_message_id TEXT NOT NULL,
-      target_installation TEXT NOT NULL,
-      target_platform TEXT NOT NULL,
-      target_conversation_id TEXT NOT NULL,
-      target_message_id TEXT NOT NULL,
-      target_group_id TEXT NOT NULL,
-      is_primary INTEGER NOT NULL DEFAULT 0 CHECK(is_primary IN (0, 1)),
-      created_at INTEGER NOT NULL,
-      UNIQUE(source_installation, source_platform, source_conversation_id,
-             media_group_id, source_message_id, target_installation,
-             target_platform, target_conversation_id)
-    );
-  )");
-  connection.execute(R"(
-    CREATE INDEX IF NOT EXISTS idx_bridge_media_group_lookup
-    ON bridge_media_group_mappings(
-      source_installation, source_platform, source_conversation_id,
-      media_group_id, target_installation, target_platform,
-      target_conversation_id);
-  )");
-}
-
-void validate_v3_shape(obcx::core::IDbConnection &connection) {
-  validate_common_columns(connection);
-  require_columns(
-      connection, std::string{kMappingsTable},
-      {"source_conversation_id", "target_conversation_id", "is_primary"});
-  require_columns(
-      connection, std::string{kRetriesTable},
-      {"source_conversation_id", "target_conversation_id", "source_group_id"});
-  require_columns(
-      connection, std::string{kMediaGroupsTable},
-      {"source_conversation_id", "target_conversation_id", "is_primary"});
-  for (const auto index : {"idx_bridge_message_mapping_reverse",
-                           "idx_bridge_message_retry_next_retry",
-                           "idx_bridge_media_group_lookup"}) {
-    if (!index_exists(connection, index)) {
-      throw std::runtime_error("bridge schema is missing index " +
-                               std::string{index});
-    }
-  }
-  const auto invalid_mapping_primary = connection.query(R"(
-    SELECT COUNT(*) AS count FROM (
-      SELECT target_installation, target_platform, target_conversation_id,
-             target_message_id, source_installation, source_platform,
-             source_conversation_id
-      FROM bridge_message_mappings
-      GROUP BY target_installation, target_platform, target_conversation_id,
-               target_message_id, source_installation, source_platform,
-               source_conversation_id
-      HAVING SUM(is_primary) != 1
-    );
-  )");
-  if (!invalid_mapping_primary.empty() &&
-      db_int64(invalid_mapping_primary.front(), "count") != 0) {
-    throw std::runtime_error(
-        "bridge schema contains invalid message mapping primary ownership");
-  }
-  const auto invalid_media_primary = connection.query(R"(
-    SELECT COUNT(*) AS count FROM (
-      SELECT source_installation, source_platform, source_conversation_id,
-             media_group_id, target_installation, target_platform,
-             target_conversation_id, target_message_id
-      FROM bridge_media_group_mappings
-      GROUP BY source_installation, source_platform, source_conversation_id,
-               media_group_id, target_installation, target_platform,
-               target_conversation_id, target_message_id
-      HAVING SUM(is_primary) != 1
-    );
-  )");
-  if (!invalid_media_primary.empty() &&
-      db_int64(invalid_media_primary.front(), "count") != 0) {
-    throw std::runtime_error(
-        "bridge schema contains invalid media-group primary ownership");
   }
 }
 
@@ -407,13 +248,13 @@ void BridgeStateRepository::initialize_schema() {
         if (table_exists(connection, kSchemaTable)) {
           const auto rows =
               connection.query("SELECT version FROM bridge_schema_version "
-                               "ORDER BY version DESC LIMIT 1;");
-          if (rows.empty() ||
+                               ";");
+          if (rows.size() != 1 ||
               db_int64(rows.front(), "version") != current_schema_version) {
-            throw std::runtime_error(
-                "bridge requires schema v3; upgrades are not supported");
+            throw std::runtime_error("bridge requires current typed schema 5");
           }
-          validate_v3_shape(connection);
+          validate_auxiliary_columns(connection);
+          validate_v4_ledger(connection);
           return;
         }
         if (!connection
@@ -424,13 +265,14 @@ void BridgeStateRepository::initialize_schema() {
               "bridge refuses unversioned or partial state");
         }
         create_auxiliary_tables(connection);
-        create_v3_message_tables(connection);
+        create_v4_ledger(connection);
         connection.execute(
             "CREATE TABLE bridge_schema_version (version INTEGER NOT NULL);");
         connection.execute(
             "INSERT INTO bridge_schema_version(version) VALUES (?);",
             {current_schema_version});
-        validate_v3_shape(connection);
+        validate_auxiliary_columns(connection);
+        validate_v4_ledger(connection);
       });
 }
 
@@ -438,17 +280,16 @@ void BridgeStateRepository::validate_schema() const {
   db_manager_.run_read<void>(
       db_instance_, [](obcx::core::IDbConnection &connection) {
         if (!table_exists(connection, kSchemaTable)) {
-          throw std::runtime_error("bridge requires initialized schema v3");
+          throw std::runtime_error("bridge requires initialized schema 5");
         }
         const auto rows =
-            connection.query("SELECT version FROM bridge_schema_version ORDER "
-                             "BY version DESC LIMIT 1;");
-        if (rows.empty() ||
+            connection.query("SELECT version FROM bridge_schema_version;");
+        if (rows.size() != 1 ||
             db_int64(rows.front(), "version") != current_schema_version) {
-          throw std::runtime_error(
-              "bridge requires schema v3; upgrades are not supported");
+          throw std::runtime_error("bridge requires current typed schema 5");
         }
-        validate_v3_shape(connection);
+        validate_auxiliary_columns(connection);
+        validate_v4_ledger(connection);
       });
 }
 
@@ -461,246 +302,6 @@ auto BridgeStateRepository::schema_version() const -> std::int64_t {
           return rows.empty() ? 0 : db_int64(rows.front(), "version");
         }
         return std::int64_t{0};
-      });
-}
-
-namespace {
-
-auto mapping_from_row(const obcx::core::DbRow &row) -> storage::MessageMapping {
-  return {.source_installation = db_string(row, "source_installation"),
-          .source_platform = db_string(row, "source_platform"),
-          .source_conversation_id = db_string(row, "source_conversation_id"),
-          .source_message_id = db_string(row, "source_message_id"),
-          .target_installation = db_string(row, "target_installation"),
-          .target_platform = db_string(row, "target_platform"),
-          .target_conversation_id = db_string(row, "target_conversation_id"),
-          .target_message_id = db_string(row, "target_message_id"),
-          .is_primary = db_int64(row, "is_primary") != 0,
-          .created_at = time_point_from_ms(db_int64(row, "created_at"))};
-}
-
-} // namespace
-
-auto BridgeStateRepository::add_message_mapping(
-    const storage::MessageMapping &mapping,
-    const MessageMappingWritePurpose purpose) -> bool {
-  validate_message_identity({.installation_id = mapping.source_installation,
-                             .platform = mapping.source_platform,
-                             .conversation_id = mapping.source_conversation_id,
-                             .message_id = mapping.source_message_id},
-                            "source mapping");
-  validate_message_identity({.installation_id = mapping.target_installation,
-                             .platform = mapping.target_platform,
-                             .conversation_id = mapping.target_conversation_id,
-                             .message_id = mapping.target_message_id},
-                            "target mapping");
-  if (mapping.source_platform == mapping.target_platform) {
-    throw std::invalid_argument(
-        "Bridge mapping source and target platforms must differ");
-  }
-  switch (purpose) {
-  case MessageMappingWritePurpose::General:
-    general_mapping_writes_.fetch_add(1, std::memory_order_relaxed);
-    break;
-  case MessageMappingWritePurpose::DirectForward:
-    direct_forward_writes_.fetch_add(1, std::memory_order_relaxed);
-    break;
-  case MessageMappingWritePurpose::RetryCompletion:
-    retry_completion_writes_.fetch_add(1, std::memory_order_relaxed);
-    break;
-  case MessageMappingWritePurpose::DeferredMediaGroup:
-    deferred_media_group_writes_.fetch_add(1, std::memory_order_relaxed);
-    break;
-  }
-  return db_manager_.run_write<bool>(
-      db_instance_, [&mapping](obcx::core::IDbConnection &connection) {
-        connection.execute(
-            R"(
-          INSERT INTO bridge_message_mappings
-            (source_installation, source_platform, source_conversation_id,
-             source_message_id, target_installation, target_platform,
-             target_conversation_id, target_message_id, is_primary, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(source_installation, source_platform,
-                      source_conversation_id, source_message_id,
-                      target_installation, target_platform,
-                      target_conversation_id)
-          DO UPDATE SET target_message_id = excluded.target_message_id,
-                        is_primary = excluded.is_primary,
-                        created_at = excluded.created_at;
-        )",
-            {mapping.source_installation, mapping.source_platform,
-             mapping.source_conversation_id, mapping.source_message_id,
-             mapping.target_installation, mapping.target_platform,
-             mapping.target_conversation_id, mapping.target_message_id,
-             static_cast<std::int64_t>(mapping.is_primary ? 1 : 0),
-             timestamp_ms(mapping.created_at)});
-        return true;
-      });
-}
-
-auto BridgeStateRepository::resolve_target_mapping(
-    const BridgeMessageIdentity &source, const BridgeMessageScope &target,
-    const MessageMappingReadPurpose purpose) -> MessageMappingResolution {
-  validate_message_identity(source, "source lookup");
-  validate_message_scope(target, "target lookup");
-  switch (purpose) {
-  case MessageMappingReadPurpose::General:
-    general_mapping_reads_.fetch_add(1, std::memory_order_relaxed);
-    break;
-  case MessageMappingReadPurpose::PreSendDeduplication:
-    pre_send_deduplication_reads_.fetch_add(1, std::memory_order_relaxed);
-    break;
-  case MessageMappingReadPurpose::PostSendRecovery:
-    post_send_recovery_reads_.fetch_add(1, std::memory_order_relaxed);
-    break;
-  }
-  return db_manager_.run_read<MessageMappingResolution>(
-      db_instance_, [&](obcx::core::IDbConnection &connection) {
-        const auto rows = connection.query(
-            R"(
-          SELECT * FROM bridge_message_mappings
-          WHERE source_installation = ? AND source_platform = ?
-            AND source_conversation_id = ? AND source_message_id = ?
-            AND target_installation = ? AND target_platform = ?
-            AND target_conversation_id = ?;
-        )",
-            {source.installation_id, source.platform, source.conversation_id,
-             source.message_id, target.installation_id, target.platform,
-             target.conversation_id});
-        if (rows.empty()) {
-          return MessageMappingResolution{};
-        }
-        if (rows.size() != 1) {
-          return MessageMappingResolution{
-              .status = MappingResolutionStatus::Corrupt,
-              .diagnostic = "corrupt_message_mapping"};
-        }
-        return MessageMappingResolution{
-            .status = MappingResolutionStatus::Unique,
-            .mapping = mapping_from_row(rows.front())};
-      });
-}
-
-auto BridgeStateRepository::resolve_source_mapping(
-    const BridgeMessageIdentity &target, const BridgeMessageScope &source)
-    -> MessageMappingResolution {
-  validate_message_identity(target, "target reverse lookup");
-  validate_message_scope(source, "source reverse lookup");
-  general_mapping_reads_.fetch_add(1, std::memory_order_relaxed);
-  return db_manager_.run_read<MessageMappingResolution>(
-      db_instance_, [&](obcx::core::IDbConnection &connection) {
-        const auto rows = connection.query(
-            R"(
-          SELECT * FROM bridge_message_mappings
-          WHERE target_installation = ? AND target_platform = ?
-            AND target_conversation_id = ? AND target_message_id = ?
-            AND source_installation = ? AND source_platform = ?
-            AND source_conversation_id = ?;
-        )",
-            {target.installation_id, target.platform, target.conversation_id,
-             target.message_id, source.installation_id, source.platform,
-             source.conversation_id});
-        if (rows.empty()) {
-          return MessageMappingResolution{};
-        }
-        std::optional<storage::MessageMapping> primary;
-        std::size_t primary_count = 0;
-        for (const auto &row : rows) {
-          auto mapping = mapping_from_row(row);
-          if (mapping.is_primary) {
-            ++primary_count;
-            primary = std::move(mapping);
-          }
-        }
-        if (primary_count == 1) {
-          return MessageMappingResolution{.status =
-                                              MappingResolutionStatus::Unique,
-                                          .mapping = std::move(primary)};
-        }
-        return MessageMappingResolution{
-            .status = primary_count == 0 ? MappingResolutionStatus::Corrupt
-                                         : MappingResolutionStatus::Ambiguous,
-            .diagnostic = primary_count == 0 ? "corrupt_message_mapping"
-                                             : "ambiguous_message_mapping"};
-      });
-}
-
-auto BridgeStateRepository::message_mapping_operation_counts() const noexcept
-    -> MessageMappingOperationCounts {
-  return {
-      .general_reads = general_mapping_reads_.load(std::memory_order_relaxed),
-      .pre_send_deduplication_reads =
-          pre_send_deduplication_reads_.load(std::memory_order_relaxed),
-      .post_send_recovery_reads =
-          post_send_recovery_reads_.load(std::memory_order_relaxed),
-      .general_writes = general_mapping_writes_.load(std::memory_order_relaxed),
-      .direct_forward_writes =
-          direct_forward_writes_.load(std::memory_order_relaxed),
-      .retry_completion_writes =
-          retry_completion_writes_.load(std::memory_order_relaxed),
-      .deferred_media_group_writes =
-          deferred_media_group_writes_.load(std::memory_order_relaxed),
-  };
-}
-
-void BridgeStateRepository::reset_message_mapping_operation_counts() noexcept {
-  general_mapping_reads_.store(0, std::memory_order_relaxed);
-  pre_send_deduplication_reads_.store(0, std::memory_order_relaxed);
-  post_send_recovery_reads_.store(0, std::memory_order_relaxed);
-  general_mapping_writes_.store(0, std::memory_order_relaxed);
-  direct_forward_writes_.store(0, std::memory_order_relaxed);
-  retry_completion_writes_.store(0, std::memory_order_relaxed);
-  deferred_media_group_writes_.store(0, std::memory_order_relaxed);
-}
-
-auto BridgeStateRepository::update_message_mapping(
-    const BridgeMessageIdentity &source, const BridgeMessageScope &target,
-    const std::string &new_target_message_id) -> bool {
-  validate_message_identity(source, "source mapping update");
-  validate_message_scope(target, "target mapping update");
-  if (new_target_message_id.empty()) {
-    throw std::invalid_argument("Bridge target message id is empty");
-  }
-  return db_manager_.run_write<bool>(
-      db_instance_, [&](obcx::core::IDbConnection &connection) {
-        connection.execute(R"(
-          UPDATE bridge_message_mappings
-          SET target_message_id = ?, created_at = ?
-          WHERE source_installation = ? AND source_platform = ?
-            AND source_conversation_id = ? AND source_message_id = ?
-            AND target_installation = ? AND target_platform = ?
-            AND target_conversation_id = ?;
-        )",
-                           {new_target_message_id,
-                            timestamp_ms(std::chrono::system_clock::now()),
-                            source.installation_id, source.platform,
-                            source.conversation_id, source.message_id,
-                            target.installation_id, target.platform,
-                            target.conversation_id});
-        return true;
-      });
-}
-
-auto BridgeStateRepository::delete_message_mapping(
-    const BridgeMessageIdentity &source, const BridgeMessageScope &target)
-    -> bool {
-  validate_message_identity(source, "source mapping delete");
-  validate_message_scope(target, "target mapping delete");
-  return db_manager_.run_write<bool>(
-      db_instance_, [&](obcx::core::IDbConnection &connection) {
-        connection.execute(R"(
-          DELETE FROM bridge_message_mappings
-          WHERE source_installation = ? AND source_platform = ?
-            AND source_conversation_id = ? AND source_message_id = ?
-            AND target_installation = ? AND target_platform = ?
-            AND target_conversation_id = ?;
-        )",
-                           {source.installation_id, source.platform,
-                            source.conversation_id, source.message_id,
-                            target.installation_id, target.platform,
-                            target.conversation_id});
-        return true;
       });
 }
 
@@ -858,6 +459,103 @@ auto BridgeStateRepository::save_sticker_cache(
              cache_info.conversion_status, timestamp_ms(cache_info.created_at),
              timestamp_ms(cache_info.last_used_at)});
         return true;
+      });
+}
+
+auto BridgeStateRepository::save_sticker_cache_if_unchanged(
+    const std::optional<storage::StickerCacheInfo> &expected,
+    const storage::StickerCacheInfo &cache_info) -> bool {
+  require_installation(cache_info.installation_id, "sticker installation");
+  if (expected && (expected->installation_id != cache_info.installation_id ||
+                   expected->platform != cache_info.platform ||
+                   expected->sticker_hash != cache_info.sticker_hash))
+    throw std::invalid_argument("cache replacement changes scope or key");
+  const auto parameters = [](const storage::StickerCacheInfo &row) {
+    return obcx::core::DbParams{row.installation_id,
+                                row.platform,
+                                row.sticker_id,
+                                row.sticker_hash,
+                                optional_string(row.original_name),
+                                row.file_type,
+                                optional_string(row.mime_type),
+                                row.original_file_path,
+                                optional_string(row.converted_file_path),
+                                row.container_path,
+                                optional_int64(row.file_size),
+                                row.conversion_status,
+                                timestamp_ms(row.created_at),
+                                timestamp_ms(row.last_used_at)};
+  };
+  return db_manager_.run_transaction<bool>(
+      db_instance_, [&](obcx::core::IDbConnection &connection) {
+        auto values = parameters(cache_info);
+        std::string sql;
+        if (!expected) {
+          sql = R"(
+            INSERT INTO bridge_sticker_cache
+              (installation_id, platform, sticker_id, sticker_hash,
+               original_name, file_type, mime_type, original_file_path,
+               converted_file_path, container_path, file_size, conversion_status,
+               created_at, last_used_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(installation_id, platform, sticker_hash) DO NOTHING
+            RETURNING sticker_hash;
+          )";
+        } else {
+          sql = R"(
+            UPDATE bridge_sticker_cache SET
+              installation_id=?, platform=?, sticker_id=?, sticker_hash=?,
+              original_name=?, file_type=?, mime_type=?, original_file_path=?,
+              converted_file_path=?, container_path=?, file_size=?, conversion_status=?,
+              created_at=?, last_used_at=?
+            WHERE installation_id IS ? AND platform IS ? AND sticker_id IS ?
+              AND sticker_hash IS ? AND original_name IS ? AND file_type IS ?
+              AND mime_type IS ? AND original_file_path IS ?
+              AND converted_file_path IS ? AND container_path IS ?
+              AND file_size IS ? AND conversion_status IS ?
+              AND created_at IS ? AND last_used_at IS ?
+            RETURNING sticker_hash;
+          )";
+          auto prior = parameters(*expected);
+          values.insert(values.end(), prior.begin(), prior.end());
+        }
+        const auto rows = connection.query(sql, values);
+        if (rows.size() > 1 ||
+            (!rows.empty() && db_string(rows.front(), "sticker_hash") !=
+                                  cache_info.sticker_hash))
+          throw std::runtime_error("invalid cache replacement result");
+        return !rows.empty();
+      });
+}
+
+auto BridgeStateRepository::sticker_cache_file_references(
+    const std::string &filename)
+    -> std::vector<storage::StickerCacheFileReference> {
+  if (filename.empty() || filename.find('/') != std::string::npos ||
+      filename.find('\0') != std::string::npos)
+    throw std::invalid_argument("cache reference lookup requires a filename");
+  const auto suffix = "/" + filename;
+  return db_manager_.run_read<std::vector<storage::StickerCacheFileReference>>(
+      db_instance_, [&](obcx::core::IDbConnection &connection) {
+        // Select lexical aliases too (e.g. a historical doubled separator).
+        // The filesystem owner maps each returned host path before comparison.
+        const auto rows = connection.query(R"(
+          SELECT installation_id, platform, sticker_hash,
+                 original_file_path AS host_path FROM bridge_sticker_cache
+            WHERE substr(original_file_path, -length(?)) = ?
+          UNION
+          SELECT installation_id, platform, sticker_hash,
+                 converted_file_path AS host_path FROM bridge_sticker_cache
+            WHERE substr(converted_file_path, -length(?)) = ?;
+        )",
+                                           {suffix, suffix, suffix, suffix});
+        std::vector<storage::StickerCacheFileReference> result;
+        result.reserve(rows.size());
+        for (const auto &row : rows)
+          result.push_back(
+              {db_string(row, "installation_id"), db_string(row, "platform"),
+               db_string(row, "sticker_hash"), db_string(row, "host_path")});
+        return result;
       });
 }
 
@@ -1026,268 +724,6 @@ auto BridgeStateRepository::update_qq_sticker_last_used(
       });
 }
 
-auto BridgeStateRepository::add_message_retry(
-    const storage::MessageRetryInfo &retry_info) -> bool {
-  const BridgeMessageIdentity source{
-      .installation_id = retry_info.source_installation,
-      .platform = retry_info.source_platform,
-      .conversation_id = retry_info.source_conversation_id,
-      .message_id = retry_info.source_message_id};
-  const BridgeMessageScope target{
-      .installation_id = retry_info.target_installation,
-      .platform = retry_info.target_platform,
-      .conversation_id = retry_info.target_conversation_id};
-  validate_message_identity(source, "retry source");
-  validate_message_scope(target, "retry target");
-  if (native_conversation_id(source.platform, source.conversation_id) !=
-          retry_info.source_group_id ||
-      native_conversation_id(target.platform, target.conversation_id) !=
-          retry_info.group_id) {
-    throw std::invalid_argument(
-        "Bridge retry group metadata disagrees with conversation identity");
-  }
-  return db_manager_.run_write<bool>(
-      db_instance_, [&retry_info](obcx::core::IDbConnection &connection) {
-        connection.execute(
-            R"(
-          INSERT INTO bridge_message_retry_queue
-            (source_installation, source_platform, source_conversation_id,
-             target_installation, target_platform, target_conversation_id,
-             source_message_id, message_content, group_id, source_group_id,
-             target_topic_id, retry_count, max_retry_count, failure_reason,
-             retry_type, next_retry_at, created_at, last_attempt_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(source_installation, source_platform,
-                      source_conversation_id, source_message_id,
-                      target_installation, target_platform,
-                      target_conversation_id)
-          DO UPDATE SET message_content = excluded.message_content,
-                        group_id = excluded.group_id,
-                        source_group_id = excluded.source_group_id,
-                        target_topic_id = excluded.target_topic_id,
-                        retry_count = excluded.retry_count,
-                        max_retry_count = excluded.max_retry_count,
-                        failure_reason = excluded.failure_reason,
-                        retry_type = excluded.retry_type,
-                        next_retry_at = excluded.next_retry_at,
-                        last_attempt_at = excluded.last_attempt_at;
-        )",
-            {retry_info.source_installation, retry_info.source_platform,
-             retry_info.source_conversation_id, retry_info.target_installation,
-             retry_info.target_platform, retry_info.target_conversation_id,
-             retry_info.source_message_id, retry_info.message_content,
-             retry_info.group_id, retry_info.source_group_id,
-             retry_info.target_topic_id,
-             static_cast<std::int64_t>(retry_info.retry_count),
-             static_cast<std::int64_t>(retry_info.max_retry_count),
-             retry_info.failure_reason, retry_info.retry_type,
-             timestamp_ms(retry_info.next_retry_at),
-             timestamp_ms(retry_info.created_at),
-             timestamp_ms(retry_info.last_attempt_at)});
-        return true;
-      });
-}
-
-auto BridgeStateRepository::get_pending_message_retries(
-    const std::chrono::system_clock::time_point &ready_at, const int limit)
-    -> std::vector<storage::MessageRetryInfo> {
-  return db_manager_.run_read<std::vector<storage::MessageRetryInfo>>(
-      db_instance_, [&](obcx::core::IDbConnection &connection) {
-        const auto rows = connection.query(
-            R"(
-          SELECT source_installation, source_platform, source_conversation_id,
-                 target_installation, target_platform, target_conversation_id,
-                 source_message_id, message_content, group_id,
-                 source_group_id, target_topic_id, retry_count,
-                 max_retry_count, failure_reason, retry_type, next_retry_at,
-                 created_at, last_attempt_at
-          FROM bridge_message_retry_queue
-          WHERE next_retry_at <= ? AND retry_count < max_retry_count
-          ORDER BY next_retry_at ASC LIMIT ?;
-        )",
-            {timestamp_ms(ready_at), static_cast<std::int64_t>(limit)});
-        std::vector<storage::MessageRetryInfo> retries;
-        retries.reserve(rows.size());
-        for (const auto &row : rows) {
-          retries.push_back(storage::MessageRetryInfo{
-              .source_installation = db_string(row, "source_installation"),
-              .source_platform = db_string(row, "source_platform"),
-              .source_conversation_id =
-                  db_string(row, "source_conversation_id"),
-              .target_installation = db_string(row, "target_installation"),
-              .target_platform = db_string(row, "target_platform"),
-              .target_conversation_id =
-                  db_string(row, "target_conversation_id"),
-              .source_message_id = db_string(row, "source_message_id"),
-              .message_content = db_string(row, "message_content"),
-              .group_id = db_string(row, "group_id"),
-              .source_group_id = db_string(row, "source_group_id"),
-              .target_topic_id = db_int64(row, "target_topic_id"),
-              .retry_count = static_cast<int>(db_int64(row, "retry_count")),
-              .max_retry_count =
-                  static_cast<int>(db_int64(row, "max_retry_count")),
-              .failure_reason =
-                  db_optional_string(row, "failure_reason").value_or(""),
-              .retry_type = db_string(row, "retry_type"),
-              .next_retry_at =
-                  time_point_from_ms(db_int64(row, "next_retry_at")),
-              .created_at = time_point_from_ms(db_int64(row, "created_at")),
-              .last_attempt_at =
-                  time_point_from_ms(db_int64(row, "last_attempt_at")),
-          });
-        }
-        return retries;
-      });
-}
-
-auto BridgeStateRepository::update_message_retry(
-    const BridgeMessageIdentity &source, const BridgeMessageScope &target,
-    const int retry_count,
-    const std::chrono::system_clock::time_point &next_retry_at,
-    const std::string &failure_reason) -> bool {
-  validate_message_identity(source, "retry source update");
-  validate_message_scope(target, "retry target update");
-  return db_manager_.run_write<bool>(
-      db_instance_, [&](obcx::core::IDbConnection &connection) {
-        connection.execute(R"(
-          UPDATE bridge_message_retry_queue
-          SET retry_count = ?, next_retry_at = ?, failure_reason = ?,
-              last_attempt_at = ?
-          WHERE source_installation = ? AND source_platform = ?
-            AND source_conversation_id = ? AND source_message_id = ?
-            AND target_installation = ? AND target_platform = ?
-            AND target_conversation_id = ?;
-        )",
-                           {static_cast<std::int64_t>(retry_count),
-                            timestamp_ms(next_retry_at), failure_reason,
-                            timestamp_ms(std::chrono::system_clock::now()),
-                            source.installation_id, source.platform,
-                            source.conversation_id, source.message_id,
-                            target.installation_id, target.platform,
-                            target.conversation_id});
-        return true;
-      });
-}
-
-auto BridgeStateRepository::remove_message_retry(
-    const BridgeMessageIdentity &source, const BridgeMessageScope &target)
-    -> bool {
-  validate_message_identity(source, "retry source delete");
-  validate_message_scope(target, "retry target delete");
-  return db_manager_.run_write<bool>(
-      db_instance_, [&](obcx::core::IDbConnection &connection) {
-        connection.execute(R"(
-          DELETE FROM bridge_message_retry_queue
-          WHERE source_installation = ? AND source_platform = ?
-            AND source_conversation_id = ? AND source_message_id = ?
-            AND target_installation = ? AND target_platform = ?
-            AND target_conversation_id = ?;
-        )",
-                           {source.installation_id, source.platform,
-                            source.conversation_id, source.message_id,
-                            target.installation_id, target.platform,
-                            target.conversation_id});
-        return true;
-      });
-}
-
-auto BridgeStateRepository::add_media_group_mapping(
-    const MediaGroupMapping &mapping) -> bool {
-  const BridgeMessageIdentity source{
-      .installation_id = mapping.source_installation,
-      .platform = mapping.source_platform,
-      .conversation_id = mapping.source_conversation_id,
-      .message_id = mapping.source_message_id};
-  const BridgeMessageIdentity target{
-      .installation_id = mapping.target_installation,
-      .platform = mapping.target_platform,
-      .conversation_id = mapping.target_conversation_id,
-      .message_id = mapping.target_message_id};
-  validate_message_identity(source, "media-group source");
-  validate_message_identity(target, "media-group target");
-  if (mapping.media_group_id.empty() ||
-      native_conversation_id(target.platform, target.conversation_id) !=
-          mapping.target_group_id) {
-    throw std::invalid_argument(
-        "Bridge media-group identity or target metadata is invalid");
-  }
-  return db_manager_.run_write<bool>(
-      db_instance_, [&mapping](obcx::core::IDbConnection &connection) {
-        connection.execute(
-            R"(
-          INSERT INTO bridge_media_group_mappings
-            (source_installation, source_platform, source_conversation_id,
-             media_group_id, source_message_id, target_installation,
-             target_platform, target_conversation_id, target_message_id,
-             target_group_id, is_primary, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(source_installation, source_platform,
-                      source_conversation_id, media_group_id,
-                      source_message_id, target_installation,
-                      target_platform, target_conversation_id)
-          DO UPDATE SET target_message_id = excluded.target_message_id,
-                        target_group_id = excluded.target_group_id,
-                        is_primary = excluded.is_primary,
-                        created_at = excluded.created_at;
-        )",
-            {mapping.source_installation, mapping.source_platform,
-             mapping.source_conversation_id, mapping.media_group_id,
-             mapping.source_message_id, mapping.target_installation,
-             mapping.target_platform, mapping.target_conversation_id,
-             mapping.target_message_id, mapping.target_group_id,
-             static_cast<std::int64_t>(mapping.is_primary ? 1 : 0),
-             timestamp_ms(mapping.created_at)});
-        return true;
-      });
-}
-
-auto BridgeStateRepository::get_media_group_mappings(
-    const BridgeMessageScope &source, const std::string &media_group_id,
-    const BridgeMessageScope &target) -> std::vector<MediaGroupMapping> {
-  validate_message_scope(source, "media-group source lookup");
-  validate_message_scope(target, "media-group target lookup");
-  return db_manager_.run_read<std::vector<MediaGroupMapping>>(
-      db_instance_, [&](obcx::core::IDbConnection &connection) {
-        const auto rows = connection.query(
-            R"(
-          SELECT source_installation, source_platform, source_conversation_id,
-                 media_group_id, source_message_id, target_installation,
-                 target_platform, target_conversation_id, target_message_id,
-                 target_group_id, is_primary, created_at
-          FROM bridge_media_group_mappings
-          WHERE source_installation = ? AND source_platform = ?
-            AND source_conversation_id = ? AND media_group_id = ?
-            AND target_installation = ? AND target_platform = ?
-            AND target_conversation_id = ?
-          ORDER BY is_primary DESC, source_message_id ASC;
-        )",
-            {source.installation_id, source.platform, source.conversation_id,
-             media_group_id, target.installation_id, target.platform,
-             target.conversation_id});
-        std::vector<MediaGroupMapping> mappings;
-        mappings.reserve(rows.size());
-        for (const auto &row : rows) {
-          mappings.push_back(MediaGroupMapping{
-              .source_installation = db_string(row, "source_installation"),
-              .source_platform = db_string(row, "source_platform"),
-              .source_conversation_id =
-                  db_string(row, "source_conversation_id"),
-              .media_group_id = db_string(row, "media_group_id"),
-              .source_message_id = db_string(row, "source_message_id"),
-              .target_installation = db_string(row, "target_installation"),
-              .target_platform = db_string(row, "target_platform"),
-              .target_conversation_id =
-                  db_string(row, "target_conversation_id"),
-              .target_message_id = db_string(row, "target_message_id"),
-              .target_group_id = db_string(row, "target_group_id"),
-              .is_primary = db_int64(row, "is_primary") != 0,
-              .created_at = time_point_from_ms(db_int64(row, "created_at")),
-          });
-        }
-        return mappings;
-      });
-}
-
 auto BridgeStateRepository::update_platform_heartbeat(
     const std::string &installation_id, const std::string &platform,
     const std::chrono::system_clock::time_point &heartbeat_time) -> bool {
@@ -1337,3 +773,5 @@ auto BridgeStateRepository::get_platform_heartbeat(
 }
 
 } // namespace bridge
+
+#include "bridge_delivery_ledger.inc"

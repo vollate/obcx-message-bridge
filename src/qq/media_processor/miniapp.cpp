@@ -8,7 +8,7 @@
 // 实现参考 koishi-plugin-adapter-onebot / NoneBot：把卡片解析成
 // MiniAppParseResult，再统一渲染成文本消息。
 
-#include "qq/media_processor.hpp"
+#include "qq/card_formatter.hpp"
 
 #include "config.hpp"
 
@@ -23,6 +23,9 @@
 namespace bridge::qq {
 
 namespace {
+auto ready_card_text(std::string text) -> boost::asio::awaitable<std::string> {
+  co_return std::move(text);
+}
 
 // 反转义 HTML 实体（QQ 的小程序 JSON 里 URL 常含 &amp; 等）。
 auto unescape_html_entities(std::string s) -> std::string {
@@ -132,140 +135,103 @@ auto pick_desc_from_object(const nlohmann::json &obj) -> std::string {
 
 } // namespace
 
-auto QQMediaProcessor::process_json_segment(
-    const obcx::common::MessageSegment &segment)
-    -> boost::asio::awaitable<obcx::common::MessageSegment> {
-
-  obcx::common::MessageSegment converted;
-  converted.type = "text";
-
+auto CardFormatter::render_json(const obcx::bot::Json &metadata) const
+    -> std::string {
   try {
-    std::string json_data = segment.data.value("data", "");
+    std::string json_data = metadata.value("data", "");
     if (!json_data.empty()) {
       auto parse_result = parse_miniapp_json(json_data);
-      converted = format_miniapp_message(parse_result);
+      auto text = format_miniapp_message(parse_result);
       OBCX_DEBUG("转换QQ小程序JSON: success={}, title={}", parse_result.success,
                  parse_result.title);
-    } else {
-      converted.data.clear();
-      converted.data["text"] = "📱 [小程序-无数据]";
-      OBCX_DEBUG("QQ小程序JSON消息无数据");
+      return text;
     }
+    OBCX_DEBUG("QQ小程序JSON消息无数据");
+    return "📱 [小程序-无数据]";
   } catch (const std::exception &e) {
-    converted.data.clear();
-    converted.data["text"] = "📱 [小程序解析错误]";
     OBCX_ERROR("处理QQ小程序JSON时出错: {}", e.what());
+    return "📱 [小程序解析错误]";
   }
-
-  co_return converted;
 }
 
-auto QQMediaProcessor::process_app_segment(
-    const obcx::common::MessageSegment &segment)
-    -> boost::asio::awaitable<obcx::common::MessageSegment> {
-
-  obcx::common::MessageSegment converted;
-  converted.type = "text";
-
+auto CardFormatter::render_app(const obcx::bot::Json &metadata) const
+    -> std::string {
   try {
-    std::string app_data = segment.data.dump();
-    auto parse_result = parse_miniapp_json(app_data);
+    auto parse_result = parse_miniapp_json(metadata.dump());
     if (!parse_result.success) {
-      // app 段的兜底：用顶层字段拼出最低限度的展示内容
-      parse_result.title = segment.data.value("title", "应用分享");
-      parse_result.description = segment.data.value("content", "");
-      parse_result.app_name = segment.data.value("name", "");
-      if (segment.data.contains("url")) {
-        parse_result.urls.push_back(segment.data.value("url", ""));
+      // Preserve the original top-level app fallback and absent/empty values.
+      parse_result.title = metadata.value("title", "应用分享");
+      parse_result.description = metadata.value("content", "");
+      parse_result.app_name = metadata.value("name", "");
+      if (metadata.contains("url")) {
+        parse_result.urls.push_back(metadata.value("url", ""));
         parse_result.success = true;
       }
     }
-    converted = format_miniapp_message(parse_result);
+    auto text = format_miniapp_message(parse_result);
     OBCX_DEBUG("转换QQ应用分享: success={}, title={}", parse_result.success,
                parse_result.title);
+    return text;
   } catch (const std::exception &e) {
-    converted.data.clear();
-    converted.data["text"] = "📱 [应用分享解析错误]";
     OBCX_ERROR("处理QQ应用分享时出错: {}", e.what());
+    return "📱 [应用分享解析错误]";
   }
-
-  co_return converted;
 }
 
-auto QQMediaProcessor::process_ark_segment(
-    const obcx::common::MessageSegment &segment)
-    -> boost::asio::awaitable<obcx::common::MessageSegment> {
-
-  obcx::common::MessageSegment converted;
-  converted.type = "text";
-
+auto CardFormatter::render_ark(const obcx::bot::Json &metadata) const
+    -> std::string {
   try {
-    std::string ark_data = segment.data.dump();
-    auto parse_result = parse_miniapp_json(ark_data);
+    auto parse_result = parse_miniapp_json(metadata.dump());
     if (!parse_result.success) {
-      parse_result.title = segment.data.value("prompt", "ARK卡片");
-      parse_result.description = segment.data.value("desc", "");
-
-      // ARK 卡片的字段往往挂在 kv 数组里——按 key 名筛 URL 字段
-      if (segment.data.contains("kv") && segment.data.at("kv").is_array()) {
-        for (const auto &kv : segment.data.at("kv")) {
+      parse_result.title = metadata.value("prompt", "ARK卡片");
+      parse_result.description = metadata.value("desc", "");
+      if (metadata.contains("kv") && metadata.at("kv").is_array()) {
+        for (const auto &kv : metadata.at("kv")) {
           if (kv.contains("key") && kv.contains("value")) {
             std::string key = kv["key"];
             if (key.find("URL") != std::string::npos ||
-                key.find("url") != std::string::npos) {
+                key.find("url") != std::string::npos)
               parse_result.urls.push_back(kv["value"]);
-            }
           }
         }
       }
       parse_result.success =
           !parse_result.urls.empty() || !parse_result.title.empty();
     }
-    converted = format_miniapp_message(parse_result);
+    auto text = format_miniapp_message(parse_result);
     OBCX_DEBUG("转换QQ ARK卡片: success={}, title={}", parse_result.success,
                parse_result.title);
+    return text;
   } catch (const std::exception &e) {
-    converted.data.clear();
-    converted.data["text"] = "📱 [ARK卡片解析错误]";
     OBCX_ERROR("处理QQ ARK卡片时出错: {}", e.what());
+    return "📱 [ARK卡片解析错误]";
   }
-
-  co_return converted;
 }
 
-auto QQMediaProcessor::process_miniapp_segment(
-    const obcx::common::MessageSegment &segment)
-    -> boost::asio::awaitable<obcx::common::MessageSegment> {
-
-  obcx::common::MessageSegment converted;
-  converted.type = "text";
-
+auto CardFormatter::render_miniapp(const obcx::bot::Json &metadata) const
+    -> std::string {
   try {
-    std::string miniapp_data = segment.data.dump();
-    auto parse_result = parse_miniapp_json(miniapp_data);
+    auto parse_result = parse_miniapp_json(metadata.dump());
     if (!parse_result.success) {
-      // miniapp 段的兜底：直接读 title/desc/appid/url 顶层字段
-      parse_result.title = segment.data.value("title", "小程序");
-      parse_result.description = segment.data.value("desc", "");
-      parse_result.app_name = segment.data.value("appid", "");
-      if (segment.data.contains("url")) {
-        parse_result.urls.push_back(segment.data.value("url", ""));
+      parse_result.title = metadata.value("title", "小程序");
+      parse_result.description = metadata.value("desc", "");
+      parse_result.app_name = metadata.value("appid", "");
+      if (metadata.contains("url")) {
+        parse_result.urls.push_back(metadata.value("url", ""));
         parse_result.success = true;
       }
     }
-    converted = format_miniapp_message(parse_result);
+    auto text = format_miniapp_message(parse_result);
     OBCX_DEBUG("转换QQ小程序: success={}, title={}", parse_result.success,
                parse_result.title);
+    return text;
   } catch (const std::exception &e) {
-    converted.data.clear();
-    converted.data["text"] = "📱 [小程序解析错误]";
     OBCX_ERROR("处理QQ小程序时出错: {}", e.what());
+    return "📱 [小程序解析错误]";
   }
-
-  co_return converted;
 }
 
-auto QQMediaProcessor::parse_miniapp_json(const std::string &json_data) const
+auto CardFormatter::parse_miniapp_json(const std::string &json_data) const
     -> MiniAppParseResult {
   MiniAppParseResult result;
   result.raw_json = json_data;
@@ -397,12 +363,8 @@ auto QQMediaProcessor::parse_miniapp_json(const std::string &json_data) const
   return result;
 }
 
-auto QQMediaProcessor::format_miniapp_message(
-    const MiniAppParseResult &parse_result) const
-    -> obcx::common::MessageSegment {
-  obcx::common::MessageSegment segment;
-  segment.type = "text";
-
+auto CardFormatter::format_miniapp_message(
+    const MiniAppParseResult &parse_result) const -> std::string {
   std::string message_text;
 
   if (parse_result.success) {
@@ -444,11 +406,10 @@ auto QQMediaProcessor::format_miniapp_message(
     }
   }
 
-  segment.data["text"] = message_text;
-  return segment;
+  return message_text;
 }
 
-auto QQMediaProcessor::extract_urls_from_json(const std::string &json_str)
+auto CardFormatter::extract_urls_from_json(const std::string &json_str)
     -> std::vector<std::string> {
   std::vector<std::string> urls;
 
@@ -463,6 +424,37 @@ auto QQMediaProcessor::extract_urls_from_json(const std::string &json_str)
   }
 
   return urls;
+}
+
+auto CardFormatter::render_share(const obcx::bot::Json &metadata)
+    -> std::string {
+  std::string url = metadata.value("url", "");
+  std::string title = metadata.value("title", "链接分享");
+  auto text = fmt::format("[{}]\t{}", title, url);
+  OBCX_DEBUG("转换QQ链接分享为文本: title={}, url={}", title, url);
+  return text;
+}
+
+auto CardFormatter::render(obcx::onebot11::bot::RawCardView card)
+    -> boost::asio::awaitable<std::string> {
+  card.validate();
+  // All parsing is synchronous and actor-owned. Only the resulting owned
+  // string survives suspension; neither card metadata nor this is borrowed
+  // by the returned awaitable. Existing formatting/configuration stays here.
+  using obcx::onebot11::bot::CardKind;
+  switch (card.kind) {
+  case CardKind::Json:
+    return ready_card_text(render_json(card.metadata));
+  case CardKind::App:
+    return ready_card_text(render_app(card.metadata));
+  case CardKind::Ark:
+    return ready_card_text(render_ark(card.metadata));
+  case CardKind::MiniApp:
+    return ready_card_text(render_miniapp(card.metadata));
+  case CardKind::Share:
+    return ready_card_text(render_share(card.metadata));
+  }
+  throw std::invalid_argument("invalid QQ card kind");
 }
 
 } // namespace bridge::qq

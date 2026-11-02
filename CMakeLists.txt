@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 if(NOT DEFINED OBCX_CURRENT_PACKAGE)
   project(obcx_actor_bridge VERSION 0.2.0 LANGUAGES CXX)
-  find_package(obcx-sdk CONFIG REQUIRED GLOBAL)
+  find_package(obcx-sdk 2.7.0 CONFIG REQUIRED GLOBAL)
   include(OBCXPackages)
   obcx_load_configured_workspace()
   return()

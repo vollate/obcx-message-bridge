@@ -1,6 +1,6 @@
 #pragma once
 
-#include "common/message_type.hpp"
+#include <core/bot/domain_events.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -30,26 +30,13 @@ struct MessageInfo {
   std::string group_id;
   std::string user_id;
   std::string content;
-  std::string raw_message;
   std::string message_type;
   std::chrono::system_clock::time_point timestamp;
   std::optional<std::string> reply_to_message_id;
   std::optional<std::string> forwarded_to_platform;
   std::optional<std::string> forwarded_message_id;
   std::chrono::system_clock::time_point created_at;
-};
-
-struct MessageMapping {
-  std::string source_installation;
-  std::string source_platform;
-  std::string source_conversation_id;
-  std::string source_message_id;
-  std::string target_installation;
-  std::string target_platform;
-  std::string target_conversation_id;
-  std::string target_message_id;
-  bool is_primary = true;
-  std::chrono::system_clock::time_point created_at;
+  std::optional<obcx::bot::MessageReceived> message;
 };
 
 struct StickerCacheInfo {
@@ -69,6 +56,14 @@ struct StickerCacheInfo {
   std::chrono::system_clock::time_point last_used_at;
 };
 
+// Cache ownership only: never a provider reference or message contribution.
+struct StickerCacheFileReference {
+  std::string installation_id;
+  std::string platform;
+  std::string sticker_hash;
+  std::string host_path;
+};
+
 struct QQStickerMapping {
   std::string source_installation;
   std::string target_installation;
@@ -80,43 +75,6 @@ struct QQStickerMapping {
   std::optional<bool> is_gif;
   std::optional<std::string> content_type;
   std::optional<std::chrono::system_clock::time_point> last_checked_at;
-};
-
-struct MessageRetryInfo {
-  std::string source_installation;
-  std::string source_platform;
-  std::string source_conversation_id;
-  std::string target_installation;
-  std::string target_platform;
-  std::string target_conversation_id;
-  std::string source_message_id;
-  std::string message_content;
-  std::string group_id;
-  std::string source_group_id;
-  std::int64_t target_topic_id;
-  int retry_count;
-  int max_retry_count;
-  std::string failure_reason;
-  std::string retry_type;
-  std::chrono::system_clock::time_point next_retry_at;
-  std::chrono::system_clock::time_point created_at;
-  std::chrono::system_clock::time_point last_attempt_at;
-};
-
-struct MediaDownloadRetryInfo {
-  std::string installation_id;
-  std::string platform;
-  std::string file_id;
-  std::string file_type;
-  std::string download_url;
-  std::string local_path;
-  int retry_count;
-  int max_retry_count;
-  std::string failure_reason;
-  bool use_proxy;
-  std::chrono::system_clock::time_point next_retry_at;
-  std::chrono::system_clock::time_point created_at;
-  std::chrono::system_clock::time_point last_attempt_at;
 };
 
 struct PlatformHeartbeatInfo {

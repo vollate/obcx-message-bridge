@@ -1,5 +1,7 @@
 #include "qq/event_handler.hpp"
 
+#include "bridge_bot_failures.hpp"
+#include "bridge_delivery_sender.hpp"
 #include "bridge_state_repository.hpp"
 #include "config.hpp"
 #include "received_message_repository.hpp"
@@ -15,23 +17,6 @@
 
 namespace bridge::qq {
 namespace {
-
-auto is_picture_message(const storage::MessageInfo &message) -> bool {
-  if (message.message_type == "image") {
-    return true;
-  }
-  try {
-    const auto raw = nlohmann::json::parse(message.raw_message);
-    if (!raw.contains("message") || !raw["message"].is_array()) {
-      return false;
-    }
-    return std::ranges::any_of(raw["message"], [](const auto &segment) {
-      return segment.is_object() && segment.value("type", "") == "image";
-    });
-  } catch (...) {
-    return false;
-  }
-}
 
 auto json_id(const nlohmann::json &data, const std::string_view key)
     -> std::string {
@@ -62,7 +47,7 @@ auto sanitize_generated_text(std::string text) -> std::string {
 } // namespace
 
 QQEventHandler::QQEventHandler(
-    std::shared_ptr<BridgeBotOperations> operations,
+    std::shared_ptr<BridgeCommandOperations> operations,
     std::shared_ptr<const bridge::BridgeConfig> config,
     std::shared_ptr<bridge::BridgeStateRepository> state_repository,
     std::shared_ptr<bridge::ReceivedMessageRepository>
@@ -77,23 +62,14 @@ QQEventHandler::QQEventHandler(
   }
 }
 
-auto QQEventHandler::handle_recall_event(obcx::common::Event event)
+auto QQEventHandler::handle_recall_event(obcx::bot::MessageDeleted deleted)
     -> boost::asio::awaitable<void> {
   try {
-    const auto notice = std::get<obcx::common::NoticeEvent>(event);
-    if (notice.notice_type == "notify" &&
-        notice.data.value("sub_type", "") == "poke") {
-      co_await handle_poke_event(notice);
-      co_return;
-    }
-    if (notice.notice_type != "group_recall" || !notice.group_id.has_value()) {
-      co_return;
-    }
-    const auto qq_group_id = *notice.group_id;
-    const auto recalled_id = json_id(notice.data, "message_id");
-    if (recalled_id.empty()) {
-      co_return;
-    }
+    deleted.validate();
+    // The typed observation is authoritative. Recover only the original
+    // configured spelling, not a group ID guessed from the archive payload.
+    const auto qq_group_id =
+        operations_->onebot11_group_id(deleted.message.conversation);
     const auto [telegram_group_id, topic_id] =
         config_->tg_group_and_topic_id(operations_->pair_id(), qq_group_id);
     const auto *route =
@@ -102,75 +78,72 @@ auto QQEventHandler::handle_recall_event(obcx::common::Event event)
       co_return;
     }
 
-    MessageMappingResolution mapping;
+    if (!state_repository_ || !blocking_executor_)
+      throw std::runtime_error("recall propagation storage unavailable");
     std::optional<storage::MessageInfo> original;
-    if (state_repository_ || received_message_repository_) {
-      const auto source_installation =
-          operations_->onebot11_installation().installation_id;
-      const auto target_installation =
-          operations_->telegram_installation().installation_id;
-      const auto source_conversation = qq_conversation_id(qq_group_id);
-      const auto target_conversation =
-          telegram_conversation_id(telegram_group_id);
-      std::tie(mapping, original) = co_await blocking_executor_->run(
-          [state = state_repository_, received = received_message_repository_,
-           source_installation, target_installation, source_conversation,
-           target_conversation, recalled_id] {
-            return std::pair{
-                state ? state->resolve_target_mapping(
-                            {.installation_id = source_installation,
-                             .platform = "qq",
-                             .conversation_id = source_conversation,
-                             .message_id = recalled_id},
-                            {.installation_id = target_installation,
-                             .platform = "telegram",
-                             .conversation_id = target_conversation})
-                      : MessageMappingResolution{},
-                received
-                    ? received->get_message("qq", source_installation,
-                                            source_conversation, recalled_id)
-                    : std::optional<storage::MessageInfo>{}};
+    if (received_message_repository_) {
+      original = co_await blocking_executor_->run(
+          [received = received_message_repository_, message = deleted.message] {
+            return received->get_message("qq", message);
           });
     }
-    if (mapping.missing()) {
-      co_return;
+    bool picture = false;
+    std::optional<obcx::bot::MessageReceived> source;
+    if (original) {
+      if (!original->message || original->message->message != deleted.message)
+        throw std::runtime_error("recall typed source identity mismatch");
+      source = *original->message;
+      picture = std::ranges::any_of(source->body, [](const auto &block) {
+        const auto *media = std::get_if<obcx::bot::ReceivedMedia>(&block);
+        return media && media->kind == obcx::bot::MediaKind::Image;
+      });
     }
-    if (!mapping.unique()) {
-      OBCX_WARN("QQ recall mapping resolution failed: {}",
-                mapping.diagnostic.empty() ? "ambiguous_message_mapping"
-                                           : mapping.diagnostic);
-      co_return;
+    bool show_sender = route->show_qq_to_tg_sender;
+    if (route->mode == BridgeMode::TOPIC_TO_GROUP) {
+      const auto *topic = config_->topic_config(operations_->pair_id(),
+                                                telegram_group_id, topic_id);
+      show_sender = topic != nullptr && topic->show_qq_to_tg_sender;
     }
-    const auto &target_id = mapping.mapping->target_message_id;
-
-    try {
-      if (original.has_value() && is_picture_message(*original)) {
-        co_await operations_->delete_telegram_message(telegram_group_id,
-                                                      target_id);
-        co_return;
+    obcx::telegram::bot::FormattedText text;
+    if (!picture && show_sender && original && source) {
+      std::string sender = "Unknown";
+      if (const auto *known =
+              std::get_if<obcx::bot::KnownUser>(&source->sender)) {
+        const auto member =
+            co_await obcx::bot::BotClient{*operations_->operation_gateway()}
+                .get_member({source->message.conversation, known->user});
+        if (!member.ok() &&
+            member.error->code == obcx::bot::BotOperationErrorCode::Cancelled)
+          throw BridgeBotOperationFailure(*member.error);
+        sender = member.ok() && member.value->display_name
+                     ? *member.value->display_name
+                     : known->user.id.serialized();
       }
-      bool show_sender = route->show_qq_to_tg_sender;
-      if (route->mode == BridgeMode::TOPIC_TO_GROUP) {
-        const auto *topic = config_->topic_config(operations_->pair_id(),
-                                                  telegram_group_id, topic_id);
-        show_sender = topic != nullptr && topic->show_qq_to_tg_sender;
-      }
-      std::string text = "~Message has been recalled~";
-      if (show_sender && original.has_value()) {
-        const auto sender = sanitize_generated_text(
-            co_await fetch_user_display_name(original->user_id, qq_group_id));
-        text = escape_markdown_v2(fmt::format("[{}] ", sender)) + text;
-      }
-      text = sanitize_generated_text(std::move(text));
-      co_await operations_->edit_telegram_message(telegram_group_id, target_id,
-                                                  text, "MarkdownV2");
-    } catch (const std::exception &error) {
-      OBCX_WARN("QQ recall propagation failed: {}", error.what());
+      text.emplace_back(obcx::bot::Text{
+          fmt::format("[{}] ", sanitize_generated_text(sender)), {}});
     }
-  } catch (const std::bad_variant_access &) {
-    OBCX_DEBUG("QQ recall handler received a non-notice event");
-  } catch (const std::exception &error) {
-    OBCX_ERROR("处理QQ撤回事件时出错: {}", error.what());
+    if (!picture)
+      text.emplace_back(
+          obcx::telegram::bot::StrikethroughText{"Message has been recalled"});
+    auto result = co_await propagate_bridge_recall(
+        operations_, state_repository_, blocking_executor_, deleted, picture,
+        std::move(text));
+    if (!result) {
+      throw BridgeRecallPropagationFailure(
+          "QQ recall unavailable: historical target binding missing",
+          std::nullopt);
+    }
+    if (result->interrupted || !result->completeness_known)
+      throw BridgeRecallPropagationFailure(
+          "QQ recall incomplete or uncertain; no automatic retry",
+          std::move(result));
+    if (result->replayed)
+      OBCX_DEBUG("QQ recall already admitted; no provider replay");
+  } catch (const BridgeRecallPropagationFailure &) {
+    throw;
+  } catch (const std::exception &) {
+    throw BridgeRecallPropagationFailure(
+        "QQ recall preparation failed; no automatic retry", std::nullopt);
   }
 }
 
@@ -228,15 +201,15 @@ auto QQEventHandler::handle_poke_event(const obcx::common::NoticeEvent &event)
         suffix.empty()
             ? fmt::format("[{}] {} [{}]", user, action, target)
             : fmt::format("[{}] {} [{}]{}", user, action, target, suffix);
-    const obcx::common::Message message{
-        {.type = "text", .data = {{"text", text}}}};
-    if (route->mode == BridgeMode::TOPIC_TO_GROUP && topic_id > 0) {
-      (void)co_await operations_->send_telegram_topic(telegram_group_id,
-                                                      topic_id, message);
-    } else {
-      (void)co_await operations_->send_telegram_group(telegram_group_id,
-                                                      message);
-    }
+    auto target_scope = operations_->telegram_conversation(
+        telegram_group_id,
+        route->mode == BridgeMode::TOPIC_TO_GROUP && topic_id > 0
+            ? std::optional<std::string>{std::to_string(topic_id)}
+            : std::nullopt);
+    auto outcome =
+        co_await operations_->send_telegram_text(std::move(target_scope), text);
+    if (auto *failure = std::get_if<obcx::bot::SendFailure>(&outcome))
+      throw BridgeBotSendFailure(std::move(*failure));
   } catch (const std::exception &error) {
     OBCX_ERROR("处理戳一戳事件时出错: {}", error.what());
   }
@@ -287,19 +260,6 @@ auto QQEventHandler::get_poke_action_name(const int poke_type,
     }
   }
   return "戳了戳";
-}
-
-auto QQEventHandler::escape_markdown_v2(const std::string &text)
-    -> std::string {
-  std::string result;
-  result.reserve(text.size() * 2);
-  for (const char value : text) {
-    if (std::string_view{"_*[]()~`>#+-=|{}.!"}.contains(value)) {
-      result += '\\';
-    }
-    result += value;
-  }
-  return result;
 }
 
 auto QQEventHandler::fetch_user_display_name(const std::string &user_id,
@@ -353,6 +313,10 @@ auto QQEventHandler::fetch_user_info(const std::string &user_id,
           });
     }
   } catch (const std::exception &error) {
+    // A typed SDK cancellation need not set this coroutine's Asio flag. Do
+    // not turn it into a display-name fallback followed by recall/poke I/O.
+    if (is_bridge_operation_cancelled(error))
+      throw;
     OBCX_DEBUG("获取QQ用户信息失败：{}", error.what());
   }
 }

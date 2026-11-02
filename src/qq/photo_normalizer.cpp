@@ -18,6 +18,7 @@
 #include <limits>
 #include <poll.h>
 #include <span>
+#include <spawn.h>
 #include <string>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -592,108 +593,166 @@ auto PhotoNormalizer::normalize_batch(std::vector<DownloadedImage> images) const
 auto PhotoNormalizer::run_process(const std::vector<std::string> &arguments,
                                   std::chrono::milliseconds timeout)
     -> ProcessResult {
-  if (arguments.empty() || arguments.front().empty() || timeout.count() <= 0) {
+  if (arguments.empty() || arguments.front().empty() || timeout.count() <= 0 ||
+      std::ranges::any_of(arguments, [](const auto &value) {
+        return value.find('\0') != std::string::npos;
+      }))
     return {};
-  }
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  // Build argv in the parent. Allocating C++ objects after fork in a
+  // multithreaded actor host can deadlock on inherited allocator locks.
+  std::vector<char *> argv;
+  argv.reserve(arguments.size() + 1);
+  for (const auto &argument : arguments)
+    argv.push_back(const_cast<char *>(argument.c_str()));
+  argv.push_back(nullptr);
 
-  std::array<int, 2> descriptors{};
-  if (::pipe(descriptors.data()) != 0) {
-    return {};
-  }
-  const auto child = ::fork();
-  if (child == -1) {
-    ::close(descriptors[0]);
-    ::close(descriptors[1]);
-    return {};
-  }
-  if (child == 0) {
-    (void)::setpgid(0, 0);
-    ::close(descriptors[0]);
-    if (::dup2(descriptors[1], STDOUT_FILENO) == -1 ||
-        ::dup2(descriptors[1], STDERR_FILENO) == -1) {
-      _exit(126);
+  struct Pipe {
+    std::array<int, 2> descriptors{-1, -1};
+    ~Pipe() {
+      for (const auto fd : descriptors)
+        if (fd >= 0)
+          ::close(fd);
     }
-    ::close(descriptors[1]);
-
-    std::vector<char *> argv;
-    argv.reserve(arguments.size() + 1);
-    for (const auto &argument : arguments) {
-      argv.push_back(const_cast<char *>(argument.c_str()));
+  } pipe;
+  if (::pipe2(pipe.descriptors.data(), O_CLOEXEC) != 0)
+    return {};
+  // Keep child dup/close actions correct even if the host closed a stdio FD.
+  for (auto &fd : pipe.descriptors) {
+    if (fd <= STDERR_FILENO) {
+      const int moved = ::fcntl(fd, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+      if (moved < 0)
+        return {};
+      ::close(std::exchange(fd, moved));
     }
-    argv.push_back(nullptr);
-    ::execvp(argv.front(), argv.data());
-    _exit(127);
   }
+  const auto flags = ::fcntl(pipe.descriptors[0], F_GETFL, 0);
+  if (flags < 0 ||
+      ::fcntl(pipe.descriptors[0], F_SETFL, flags | O_NONBLOCK) != 0)
+    return {};
 
-  (void)::setpgid(child, child);
-  ::close(descriptors[1]);
-  const auto flags = ::fcntl(descriptors[0], F_GETFL, 0);
-  if (flags != -1) {
-    (void)::fcntl(descriptors[0], F_SETFL, flags | O_NONBLOCK);
-  }
+  struct Actions {
+    posix_spawn_file_actions_t value;
+    int error = ::posix_spawn_file_actions_init(&value);
+    ~Actions() {
+      if (!error)
+        ::posix_spawn_file_actions_destroy(&value);
+    }
+  } actions;
+  struct Attributes {
+    posix_spawnattr_t value;
+    int error = ::posix_spawnattr_init(&value);
+    ~Attributes() {
+      if (!error)
+        ::posix_spawnattr_destroy(&value);
+    }
+  } attributes;
+  if (actions.error || attributes.error ||
+      ::posix_spawn_file_actions_adddup2(&actions.value, pipe.descriptors[1],
+                                         STDOUT_FILENO) != 0 ||
+      ::posix_spawn_file_actions_adddup2(&actions.value, pipe.descriptors[1],
+                                         STDERR_FILENO) != 0 ||
+      ::posix_spawn_file_actions_addclose(&actions.value,
+                                          pipe.descriptors[0]) != 0 ||
+      ::posix_spawn_file_actions_addclose(&actions.value,
+                                          pipe.descriptors[1]) != 0 ||
+      ::posix_spawn_file_actions_addclosefrom_np(&actions.value,
+                                                 STDERR_FILENO + 1) != 0 ||
+      ::posix_spawnattr_setpgroup(&attributes.value, 0) != 0 ||
+      ::posix_spawnattr_setflags(&attributes.value, POSIX_SPAWN_SETPGROUP) != 0)
+    return {};
+
+  struct Child {
+    pid_t pid{-1};
+    // The unreaped child pins its PID/group identity. Finish before leaving
+    // worker scope, including diagnostic allocation failures and timeout.
+    auto finish(int &status) noexcept -> bool {
+      if (pid <= 0)
+        return false;
+      (void)::kill(-pid, SIGKILL);
+      (void)::kill(pid, SIGKILL);
+      pid_t waited;
+      do {
+        waited = ::waitpid(pid, &status, 0);
+      } while (waited < 0 && errno == EINTR);
+      const bool reaped = waited == pid;
+      pid = -1;
+      return reaped;
+    }
+    ~Child() {
+      int ignored{};
+      (void)finish(ignored);
+    }
+  } child;
+  pid_t spawned = -1;
+  if (::posix_spawnp(&spawned, argv.front(), &actions.value, &attributes.value,
+                     argv.data(), environ) != 0)
+    return {};
+  child.pid = spawned;
+  ::close(std::exchange(pipe.descriptors[1], -1));
 
   ProcessResult result;
-  int status = 0;
-  bool exited = false;
-  const auto deadline = std::chrono::steady_clock::now() + timeout;
   std::array<char, 1024> buffer{};
-  while (!exited) {
-    while (true) {
-      const auto count = ::read(descriptors[0], buffer.data(), buffer.size());
-      if (count > 0) {
+  bool diagnostic_eof = false;
+  const auto drain = [&] {
+    if (diagnostic_eof)
+      return;
+    // A noisy child must not starve the deadline/wait checks indefinitely.
+    for (std::size_t reads = 0; reads < 64; ++reads) {
+      const auto count =
+          ::read(pipe.descriptors[0], buffer.data(), buffer.size());
+      if (count > 0)
         append_diagnostic_tail(result.diagnostic_tail, buffer.data(),
                                static_cast<std::size_t>(count));
+      else if (count < 0 && errno == EINTR)
         continue;
+      else {
+        if (count == 0)
+          diagnostic_eof = true;
+        break;
       }
-      if (count == -1 && errno == EINTR) {
-        continue;
-      }
-      break;
     }
-
-    const auto waited = ::waitpid(child, &status, WNOHANG);
-    if (waited == child || (waited == -1 && errno == ECHILD)) {
-      exited = true;
-      break;
-    }
+  };
+  int status{};
+  bool reaped = false;
+  while (true) {
+    drain();
     if (std::chrono::steady_clock::now() >= deadline) {
       result.timed_out = true;
-      (void)::kill(-child, SIGKILL);
-      (void)::kill(child, SIGKILL);
-      while (::waitpid(child, &status, 0) == -1 && errno == EINTR) {
-      }
-      exited = true;
+      reaped = child.finish(status);
       break;
     }
-
+    siginfo_t observed{};
+    const auto waited = ::waitid(P_PID, static_cast<id_t>(child.pid), &observed,
+                                 WEXITED | WNOHANG | WNOWAIT);
+    if (waited == 0 && observed.si_pid == child.pid) {
+      reaped = child.finish(status);
+      break;
+    }
+    if (waited < 0 && errno != EINTR) {
+      // Never turn an unknown/reaped-by-someone-else status into exit code 0.
+      if (errno == ECHILD)
+        child.pid = -1;
+      return result;
+    }
     const auto remaining =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             deadline - std::chrono::steady_clock::now());
-    pollfd descriptor{.fd = descriptors[0], .events = POLLIN, .revents = 0};
-    const auto wait_ms =
-        static_cast<int>(std::clamp<std::int64_t>(remaining.count(), 1, 50));
-    (void)::poll(&descriptor, 1, wait_ms);
+    // EOF does not prove child exit. POLLHUP is level-triggered, so polling
+    // that descriptor again would spin until exit or deadline. A negative fd
+    // keeps the same bounded wait without watching the closed diagnostic pipe.
+    pollfd descriptor{.fd = diagnostic_eof ? -1 : pipe.descriptors[0],
+                      .events = POLLIN,
+                      .revents = 0};
+    (void)::poll(
+        &descriptor, 1,
+        static_cast<int>(std::clamp<std::int64_t>(remaining.count(), 1, 50)));
   }
-
-  while (true) {
-    const auto count = ::read(descriptors[0], buffer.data(), buffer.size());
-    if (count > 0) {
-      append_diagnostic_tail(result.diagnostic_tail, buffer.data(),
-                             static_cast<std::size_t>(count));
-      continue;
-    }
-    if (count == -1 && errno == EINTR) {
-      continue;
-    }
-    break;
-  }
-  ::close(descriptors[0]);
-
-  if (!result.timed_out && WIFEXITED(status)) {
+  drain();
+  if (reaped && !result.timed_out && WIFEXITED(status))
     result.exit_code = WEXITSTATUS(status);
-  } else if (!result.timed_out && WIFSIGNALED(status)) {
+  else if (reaped && !result.timed_out && WIFSIGNALED(status))
     result.exit_code = 128 + WTERMSIG(status);
-  }
   return result;
 }
 

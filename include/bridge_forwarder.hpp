@@ -1,14 +1,13 @@
 #pragma once
 
+#include "bridge_delivery_revision.hpp"
+#include "bridge_delivery_sender.hpp"
+#include <boost/asio/awaitable.hpp>
 #include <core/actor/actor.hpp>
 #include <core/actor/actor_commands.hpp>
-
-#include <boost/asio/awaitable.hpp>
-
-#include <string>
+#include <core/actor/actor_messages.hpp>
 
 namespace bridge {
-
 enum class DirectForwardDisposition {
   NotForwarded,
   DeliveryFailed,
@@ -16,32 +15,11 @@ enum class DirectForwardDisposition {
   AlreadyPersisted,
 };
 
-struct DirectForwardOutcome {
-  DirectForwardDisposition disposition = DirectForwardDisposition::NotForwarded;
-  std::string source_platform;
-  std::string source_bot;
-  std::string source_conversation_id;
-  std::string source_message_id;
-  std::string target_platform;
-  std::string target_bot;
-  std::string target_conversation_id;
-  std::string target_message_id;
-  std::string failure_message;
-  bool failure_retryable = false;
-};
-
 struct BridgeForwardResult {
+  // Only complete durable typed evidence may authorize logical publication.
+  std::optional<BridgeDeliveryResult> domain_delivery;
+  std::optional<BridgeRevisionResult> domain_revision;
   DirectForwardDisposition disposition = DirectForwardDisposition::NotForwarded;
-  std::string source_platform;
-  std::string source_bot;
-  std::string source_conversation_id;
-  std::string source_message_id;
-  std::string target_platform;
-  std::string target_bot;
-  std::string target_conversation_id;
-  std::string target_message_id;
-  std::string failure_message;
-  bool failure_retryable = false;
 };
 
 class IBridgeForwarder {
@@ -53,18 +31,18 @@ public:
   auto operator=(IBridgeForwarder &&) -> IBridgeForwarder & = delete;
   virtual ~IBridgeForwarder() = default;
 
-  virtual auto forward_message(const obcx::core::MessageEnvelope &message)
+  virtual auto forward_message(
+      const obcx::message_store::events::MessageStored &stored,
+      const obcx::core::MessageEnvelope &message)
       -> boost::asio::awaitable<BridgeForwardResult> = 0;
-
   virtual auto handle_command(const obcx::command::CommandInvocation &)
       -> boost::asio::awaitable<bool> {
     co_return false;
   }
-
-  virtual auto handle_notice(const obcx::core::MessageEnvelope &)
+  virtual auto handle_notice(const obcx::core::MessageEnvelope &,
+                             std::optional<obcx::bot::MessageDeleted>)
       -> boost::asio::awaitable<bool> {
     co_return false;
   }
 };
-
 } // namespace bridge

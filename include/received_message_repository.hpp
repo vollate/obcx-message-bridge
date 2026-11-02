@@ -12,8 +12,7 @@ namespace bridge {
 class ReceivedMessageRepository {
 public:
   ReceivedMessageRepository(obcx::core::DbManager &db_manager,
-                            std::string db_instance,
-                            std::string db_namespace = "message_store");
+                            std::string db_instance, std::string db_namespace);
 
   auto get_message(const std::string &source_platform,
                    const std::string &source_bot,
@@ -21,7 +20,14 @@ public:
                    const std::string &message_id) const
       -> std::optional<storage::MessageInfo>;
 
+  auto get_message(const std::string &source_platform,
+                   const obcx::bot::MessageRef &message) const
+      -> std::optional<storage::MessageInfo>;
+
 private:
+  auto read(const std::string &platform, const std::string &filter,
+            const obcx::core::DbParams &parameters) const
+      -> std::optional<storage::MessageInfo>;
   obcx::core::DbManager &db_manager_;
   std::string db_instance_;
   std::string db_namespace_;

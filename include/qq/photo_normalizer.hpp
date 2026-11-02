@@ -1,6 +1,6 @@
 #pragma once
 
-#include "qq/image_url_validator.hpp"
+#include "qq/downloaded_image.hpp"
 
 #include <chrono>
 #include <cstddef>

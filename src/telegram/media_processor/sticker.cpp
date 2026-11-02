@@ -1,280 +1,313 @@
-#include "telegram/bot/operations.hpp"
+#include "media_processor.hpp"
+#include "qq/photo_normalizer.hpp"
 #include "telegram/media_processor.hpp"
 
-#include "bridge_state_repository.hpp"
-#include "config.hpp"
-
+#include <algorithm>
+#include <array>
 #include <common/logger.hpp>
+#include <core/bot/domain_codec.hpp>
 #include <filesystem>
-#include <fmt/format.h>
-#include <fstream>
-#include <media_converter.hpp>
+#include <span>
 
 namespace bridge::telegram {
+namespace {
+namespace domain = obcx::bot;
+using Bytes = std::span<const std::uint8_t>;
 
-auto TelegramMediaProcessor::process_sticker(
-    const obcx::telegram::bot::TelegramFileRef &media_info,
-    const nlohmann::json &media_data)
-    -> boost::asio::awaitable<obcx::common::MessageSegment> {
-
-  obcx::common::MessageSegment file_segment;
-
-  try {
-    auto cached_path_opt = co_await download_sticker_with_cache(media_info);
-
-    if (cached_path_opt.has_value()) {
-      std::string container_file_path = cached_path_opt.value();
-
-      file_segment.type = "image";
-      file_segment.data.clear();
-      file_segment.data["file"] = co_await blocking_executor_->run(
-          [mapper = path_manager_, container_file_path] {
-            return mapper.file_uri(
-                mapper.container_to_host_absolute(container_file_path));
-          });
-
-      if (media_data.contains("sticker")) {
-        auto sticker = media_data["sticker"];
-        std::string sticker_info = "[贴纸";
-        if (sticker.contains("emoji")) {
-          sticker_info += " " + sticker["emoji"].get<std::string>();
-        }
-        if (sticker.contains("is_animated") &&
-            sticker["is_animated"].get<bool>()) {
-          sticker_info += " 动画";
-        } else if (sticker.contains("is_video") &&
-                   sticker["is_video"].get<bool>()) {
-          sticker_info += " 视频";
-        }
-        sticker_info += "]";
-        file_segment.data["caption"] = sticker_info;
-      }
-
-      OBCX_INFO("成功缓存Telegram sticker到容器路径: {}", container_file_path);
-    } else {
-      throw std::runtime_error("缓存下载失败");
-    }
-  } catch (const std::exception &e) {
-    OBCX_WARN("缓存系统处理表情包失败: {}, 回退为文本提示", e.what());
-
-    file_segment.type = "text";
-    std::string emoji_info = "";
-    if (media_data.contains("sticker") &&
-        media_data["sticker"].contains("emoji")) {
-      emoji_info = " " + media_data["sticker"]["emoji"].get<std::string>();
-    }
-    file_segment.data["text"] = fmt::format("[贴纸{}]", emoji_info);
-  }
-
-  co_return file_segment;
+auto le32(Bytes bytes, std::size_t at) -> std::uint32_t {
+  return std::uint32_t{bytes[at]} | (std::uint32_t{bytes[at + 1]} << 8) |
+         (std::uint32_t{bytes[at + 2]} << 16) |
+         (std::uint32_t{bytes[at + 3]} << 24);
+}
+auto tag(Bytes bytes, std::size_t at) -> std::string_view {
+  return {reinterpret_cast<const char *>(bytes.data() + at), 4};
 }
 
-auto TelegramMediaProcessor::download_sticker_with_cache(
-    const obcx::telegram::bot::TelegramFileRef &media_info)
-    -> boost::asio::awaitable<std::optional<std::string>> {
-
-  try {
-    if (media_info.file_type != "sticker") {
-      OBCX_ERROR("不支持的文件类型，仅支持sticker: {}", media_info.file_type);
-      co_return std::nullopt;
-    }
-
-    // 严格使用 file_unique_id 作为唯一缓存键，不要使用任何 hash
-    if (media_info.file_unique_id.empty()) {
-      OBCX_WARN("file_unique_id为空，跳过数据库缓存操作，直接下载: {}",
-                media_info.file_id);
+// Container/geometry preflight, not an image decoder. Do not flatten animation.
+auto static_webp_dimensions(Bytes bytes) -> std::optional<qq::PhotoDimensions> {
+  if (bytes.size() < 20 || tag(bytes, 0) != "RIFF" || tag(bytes, 8) != "WEBP" ||
+      std::uint64_t{le32(bytes, 4)} + 8 != bytes.size())
+    return std::nullopt;
+  std::optional<qq::PhotoDimensions> canvas, frame;
+  unsigned seen = 0;
+  std::size_t cursor = 12;
+  while (cursor < bytes.size()) {
+    if (bytes.size() - cursor < 8)
+      return std::nullopt;
+    const auto kind = tag(bytes, cursor);
+    const std::size_t length = le32(bytes, cursor + 4);
+    cursor += 8;
+    if (length > bytes.size() - cursor)
+      return std::nullopt;
+    const auto data = bytes.subspan(cursor, length);
+    unsigned bit = 0;
+    if (kind == "VP8X") {
+      bit = 1;
+      if (cursor != 20 || length != 10 || (data[0] & 0xc3) || data[1] ||
+          data[2] || data[3])
+        return std::nullopt;
+      canvas =
+          qq::PhotoDimensions{1U + data[4] + (std::uint32_t{data[5]} << 8) +
+                                  (std::uint32_t{data[6]} << 16),
+                              1U + data[7] + (std::uint32_t{data[8]} << 8) +
+                                  (std::uint32_t{data[9]} << 16)};
+    } else if (kind == "VP8 ") {
+      bit = 2;
+      if (frame || length < 10 || (data[0] & 1) || data[3] != 0x9d ||
+          data[4] != 1 || data[5] != 0x2a)
+        return std::nullopt;
+      frame = qq::PhotoDimensions{
+          (std::uint32_t{data[6]} | (std::uint32_t{data[7]} << 8)) & 0x3fffU,
+          (std::uint32_t{data[8]} | (std::uint32_t{data[9]} << 8)) & 0x3fffU};
+    } else if (kind == "VP8L") {
+      bit = 4;
+      if (frame || length < 5 || data[0] != 0x2f || (data[4] & 0xe0) ||
+          (seen & 8))
+        return std::nullopt;
+      frame = qq::PhotoDimensions{1U + data[1] +
+                                      ((std::uint32_t{data[2]} & 0x3fU) << 8),
+                                  1U + ((std::uint32_t{data[2]} & 0xc0U) >> 6) +
+                                      (std::uint32_t{data[3]} << 2) +
+                                      ((std::uint32_t{data[4]} & 15U) << 10)};
+    } else if (kind == "ALPH") {
+      bit = 8;
+      if (!canvas || frame)
+        return std::nullopt;
+    } else if (kind == "ICCP") {
+      bit = 16;
+    } else if (kind == "EXIF") {
+      bit = 32;
+    } else if (kind == "XMP ") {
+      bit = 64;
     } else {
-      std::string cache_key = media_info.file_unique_id;
-      OBCX_DEBUG("表情包缓存查找，使用file_unique_id: {}", cache_key);
-
-      const auto installation =
-          operations_->telegram_installation().installation_id;
-      auto cached_path = co_await blocking_executor_->run(
-          [repository = state_repository_, installation, cache_key,
-           mapper = path_manager_] -> std::optional<std::string> {
-            if (!repository) {
-              return std::nullopt;
-            }
-            auto cache_info = repository->get_sticker_cache(
-                installation, "telegram", cache_key);
-            if (!cache_info.has_value()) {
-              return std::nullopt;
-            }
-            const auto host_path =
-                cache_info->conversion_status == "success" &&
-                        cache_info->converted_file_path.has_value()
-                    ? *cache_info->converted_file_path
-                    : cache_info->original_file_path;
-            if (host_path.empty() || !std::filesystem::exists(host_path) ||
-                cache_info->container_path.empty()) {
-              return std::nullopt;
-            }
-            try {
-              (void)mapper.file_uri(host_path);
-              cache_info->container_path =
-                  mapper.host_to_container_absolute(host_path);
-            } catch (const std::runtime_error &) {
-              // A root change or unsafe cached path is a miss, not permission
-              // to reuse the old peer address or overwrite the cached inode.
-              return std::nullopt;
-            }
-            cache_info->last_used_at = std::chrono::system_clock::now();
-            (void)repository->save_sticker_cache(*cache_info);
-            return cache_info->container_path;
-          });
-      if (cached_path.has_value()) {
-        OBCX_DEBUG("表情包缓存命中: {} -> {}", cache_key, *cached_path);
-        co_return cached_path;
-      }
-      OBCX_WARN("表情包缓存未命中或文件丢失，将重新下载: {}", cache_key);
+      return std::nullopt;
     }
-
-    OBCX_INFO("表情包缓存未命中，开始下载: {}", media_info.file_id);
-
-    const std::string &host_bridge_files_dir = config_->bridge_files_dir;
-    std::string original_dir = host_bridge_files_dir + "/stickers/original";
-
-    std::string file_extension = ".webp";
-    std::string mime_type = "image/webp";
-
-    if (media_info.mime_type.has_value()) {
-      mime_type = media_info.mime_type.value();
-      if (mime_type == "image/webp") {
-        file_extension = ".webp";
-      } else if (mime_type == "video/webm") {
-        file_extension = ".webm";
-      } else if (mime_type == "application/tgs") {
-        file_extension = ".tgs";
-      }
+    if (seen & bit)
+      return std::nullopt;
+    seen |= bit;
+    cursor += length;
+    if (length & 1) {
+      if (cursor == bytes.size() || bytes[cursor] != 0)
+        return std::nullopt;
+      ++cursor;
     }
-
-    std::string filename_prefix;
-    if (!media_info.file_unique_id.empty()) {
-      filename_prefix =
-          fmt::format("sticker_{}_{}", media_info.file_unique_id.substr(0, 12),
-                      media_info.file_id.substr(0, 8));
-    } else {
-      auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-                           std::chrono::system_clock::now().time_since_epoch())
-                           .count();
-      filename_prefix = fmt::format("sticker_{}_{}", timestamp,
-                                    media_info.file_id.substr(0, 8));
-    }
-    if (std::filesystem::path(filename_prefix).filename() != filename_prefix) {
-      throw std::runtime_error("invalid sticker cache filename");
-    }
-    std::string original_filename = filename_prefix + file_extension;
-    std::string original_file_path = original_dir + "/" + original_filename;
-
-    const auto fetched = co_await operations_->fetch_telegram_file(
-        media_info, config_->qq_media_download_max_bytes);
-    std::string file_content(fetched.bytes.begin(), fetched.bytes.end());
-
-    const auto downloaded_size = file_content.size();
-    co_await blocking_executor_->run([mapper = path_manager_, original_filename,
-                                      file_content = std::move(file_content)] {
-      if (!mapper.ensure_directory("stickers/original")) {
-        throw std::runtime_error("cannot create sticker cache directory");
-      }
-      (void)mapper.write_new_file("stickers/original/" + original_filename,
-                                  std::as_bytes(std::span(file_content)));
-    });
-
-    OBCX_INFO("表情包原始文件已下载: {} -> {} ({}字节)", media_info.file_id,
-              original_file_path, downloaded_size);
-
-    std::string final_file_path = original_file_path;
-    std::string final_container_path;
-    std::string conversion_status = "success";
-
-    // QQ 不能直接显示 webm 贴纸，必须先转 gif；
-    // 转换受 GIF_MAX_DURATION/SIZE/WIDTH/FPS/COLORS 等参数约束
-    if (mime_type == "video/webm" || file_extension == ".webm") {
-      OBCX_INFO("检测到webm格式贴纸，开始转换为gif: {}", original_file_path);
-
-      std::string converted_dir = host_bridge_files_dir + "/stickers/converted";
-
-      std::string converted_filename = filename_prefix + ".gif";
-      std::string converted_file_path =
-          converted_dir + "/" + converted_filename;
-
-      const auto config = config_;
-      const bool conversion_success = co_await blocking_executor_->run(
-          [config, mapper = path_manager_, original_file_path,
-           converted_file_path] {
-            return mapper.convert_file(
-                original_file_path, converted_file_path,
-                [config](const std::string &input, const std::string &output) {
-                  return bridge::MediaConverter::
-                      convert_webm_to_gif_with_fallback(
-                          config->ffmpeg_path, input, output,
-                          config->gif_max_duration, config->gif_max_file_size,
-                          config->gif_max_width, config->gif_max_fps,
-                          config->gif_max_colors);
-                });
-          });
-
-      if (conversion_success) {
-        OBCX_INFO("webm贴纸到gif转换成功: {} -> {}", original_file_path,
-                  converted_file_path);
-        final_file_path = converted_file_path;
-        final_container_path =
-            path_manager_.host_to_container_absolute(final_file_path);
-        conversion_status = "success";
-      } else {
-        OBCX_WARN("webm贴纸到gif转换失败，使用原始webm文件: {}",
-                  original_file_path);
-        final_container_path =
-            path_manager_.host_to_container_absolute(final_file_path);
-        conversion_status = "failed";
-      }
-    } else {
-      final_container_path =
-          path_manager_.host_to_container_absolute(final_file_path);
-    }
-
-    // 缓存条目以 file_unique_id 作为查询键；没有它就跳过持久化
-    if (!media_info.file_unique_id.empty()) {
-      storage::StickerCacheInfo new_cache_info;
-      new_cache_info.installation_id =
-          operations_->telegram_installation().installation_id;
-      new_cache_info.platform = "telegram";
-      new_cache_info.sticker_id = media_info.file_id;
-      new_cache_info.sticker_hash = media_info.file_unique_id;
-      new_cache_info.original_file_path = original_file_path;
-      new_cache_info.file_size = downloaded_size;
-      new_cache_info.mime_type = mime_type;
-      new_cache_info.conversion_status = conversion_status;
-      new_cache_info.created_at = std::chrono::system_clock::now();
-      new_cache_info.last_used_at = std::chrono::system_clock::now();
-      new_cache_info.container_path = final_container_path;
-
-      if (final_file_path != original_file_path) {
-        new_cache_info.converted_file_path = final_file_path;
-      }
-
-      const auto saved =
-          !state_repository_ ||
-          co_await blocking_executor_->run(
-              [repository = state_repository_, new_cache_info] {
-                return repository->save_sticker_cache(new_cache_info);
-              });
-      if (!saved) {
-        OBCX_WARN("保存表情包缓存失败，但文件已下载: {}", final_file_path);
-      }
-    } else {
-      OBCX_DEBUG("没有file_unique_id，跳过数据库保存");
-    }
-
-    OBCX_INFO("表情包缓存完成: {} -> {}", media_info.file_id,
-              final_container_path);
-    co_return final_container_path;
-
-  } catch (const std::exception &e) {
-    OBCX_ERROR("下载表情包失败 (file_id: {}): {}", media_info.file_id,
-               e.what());
-    co_return std::nullopt;
   }
+  if (!frame || !frame->width || !frame->height ||
+      (canvas && canvas != frame) ||
+      std::uint64_t{frame->width} * frame->height >
+          qq::kTelegramPhotoDecodePixelLimit)
+    return std::nullopt;
+  return frame;
 }
 
+auto static_png_dimensions(Bytes bytes) -> std::optional<qq::PhotoDimensions> {
+  constexpr std::array<std::uint8_t, 8> signature{0x89, 'P', 'N', 'G',
+                                                  13,   10,  26,  10};
+  if (bytes.size() < 33 ||
+      !std::equal(signature.begin(), signature.end(), bytes.begin()))
+    return std::nullopt;
+  const auto be32 = [&](std::size_t at) {
+    return (std::uint32_t{bytes[at]} << 24) |
+           (std::uint32_t{bytes[at + 1]} << 16) |
+           (std::uint32_t{bytes[at + 2]} << 8) | bytes[at + 3];
+  };
+  std::size_t cursor = 8, chunks = 0;
+  bool header = false, data = false;
+  qq::PhotoDimensions dimensions{};
+  while (bytes.size() - cursor >= 12 &&
+         ++chunks <= domain::detail::domain_maximum_items) {
+    const std::size_t length = be32(cursor);
+    const auto kind = tag(bytes, cursor + 4);
+    if (length > bytes.size() - cursor - 12 || kind == "acTL" ||
+        kind == "fcTL" || kind == "fdAT")
+      return std::nullopt;
+    if (!header) {
+      if (kind != "IHDR" || length != 13)
+        return std::nullopt;
+      dimensions = {be32(cursor + 8), be32(cursor + 12)};
+      if (!dimensions.width || !dimensions.height ||
+          std::uint64_t{dimensions.width} * dimensions.height >
+              qq::kTelegramPhotoDecodePixelLimit)
+        return std::nullopt;
+      header = true;
+    } else if (kind == "IHDR") {
+      return std::nullopt;
+    } else if (kind == "IDAT") {
+      data = true;
+    } else if (kind == "IEND") {
+      return length == 0 && data && cursor + 12 == bytes.size()
+                 ? std::optional{dimensions}
+                 : std::nullopt;
+    }
+    cursor += length + 12;
+  }
+  return std::nullopt;
+}
+
+auto sticker_label(const obcx::telegram::bot::StickerView &sticker,
+                   bool description) -> std::string {
+  std::string label = "[贴纸";
+  if (sticker.emoji)
+    label += " " + *sticker.emoji;
+  if (description &&
+      sticker.format == obcx::telegram::bot::StickerFormat::VideoWebm)
+    label += " 视频";
+  if (description &&
+      sticker.format == obcx::telegram::bot::StickerFormat::AnimatedTgs)
+    label += " 动画暂不支持";
+  return label + "]";
+}
+
+auto prepare_static_png(const PathManager &mapper, const std::string &original,
+                        Bytes input, std::size_t maximum_bytes,
+                        const BridgeConfig &config)
+    -> std::optional<PathManager::CreatedFile> {
+  const auto mime = MediaProcessor::detect_mime_type_from_content(std::string(
+      input.begin(), input.begin() + std::min(input.size(), std::size_t{32})));
+  if (mime != "image/webp")
+    return std::nullopt;
+  const auto dimensions = static_webp_dimensions(input);
+  if (!dimensions)
+    throw std::runtime_error("sticker WebP is not a safe static image");
+  auto filename = std::filesystem::path(original).filename();
+  filename.replace_extension(".png");
+  auto converted = mapper.convert_owned_file(
+      original, mapper.to_host_path("stickers/converted/" + filename.string()),
+      input, maximum_bytes,
+      [dimensions](Bytes encoded) {
+        return static_png_dimensions(encoded) == dimensions;
+      },
+      [&](const std::string &source_fd, const std::string &output_fd) {
+        const auto result = qq::PhotoNormalizer::run_process(
+            {config.ffmpeg_path,
+             "-nostdin",
+             "-hide_banner",
+             "-loglevel",
+             "error",
+             "-threads",
+             "1",
+             "-filter_threads",
+             "1",
+             "-protocol_whitelist",
+             "file,pipe",
+             "-f",
+             "webp_pipe",
+             "-i",
+             source_fd,
+             "-map_metadata",
+             "-1",
+             "-frames:v",
+             "1",
+             "-an",
+             "-c:v",
+             "png",
+             "-threads",
+             "1",
+             "-f",
+             "image2",
+             "-update",
+             "1",
+             "-fs",
+             std::to_string(maximum_bytes),
+             "-y",
+             output_fd},
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                qq::kTelegramPhotoNormalizationTimeout));
+        return !result.timed_out && result.exit_code == 0;
+      });
+  if (!converted)
+    throw std::runtime_error("static sticker PNG conversion failed");
+  return converted;
+}
+} // namespace
+
+auto TelegramMediaProcessor::prepare_sticker(domain::ReceivedMedia media,
+                                             domain::RichText caption,
+                                             std::size_t maximum_bytes)
+    -> boost::asio::awaitable<PreparedTelegramMedia> {
+  validate_source(media);
+  const auto sticker = obcx::telegram::bot::sticker_view(media);
+  if (!sticker)
+    throw std::invalid_argument("typed sticker observation required");
+  const bool tgs =
+      sticker->format == obcx::telegram::bot::StickerFormat::AnimatedTgs;
+  // TGS is an explicit text-only representation, not an acquisition. An
+  // exhausted media budget must not suppress its unsupported-format notice.
+  if ((!maximum_bytes && !tgs) ||
+      maximum_bytes > config_->qq_media_download_max_bytes ||
+      maximum_bytes > domain::detail::domain_maximum_bytes)
+    throw std::invalid_argument("invalid Telegram sticker byte budget");
+  std::size_t prepared_bytes = 0;
+  try {
+    // No TGS decoder: do not acquire merely to mislabel compressed JSON.
+    if (!tgs) {
+      CacheTransform transform;
+      if (sticker->format == obcx::telegram::bot::StickerFormat::StaticWebp)
+        transform = [config = config_](const PathManager &mapper,
+                                       const std::string &source, Bytes input,
+                                       std::size_t maximum) {
+          return prepare_static_png(mapper, source, input, maximum, *config);
+        };
+      auto cached = co_await read_cached_media(media, maximum_bytes,
+                                               std::move(transform));
+      prepared_bytes = cached.prepared_bytes;
+      if (cached.error)
+        std::rethrow_exception(cached.error);
+      auto bytes = std::move(cached.bytes);
+      const auto mime = MediaProcessor::detect_mime_type_from_content(
+          std::string(bytes.begin(),
+                      bytes.begin() + std::min(bytes.size(), std::size_t{32})));
+      // Successful media keeps only the source caption; the generated sticker
+      // label is reserved for the text-only fallback below.
+      auto metadata = media.metadata;
+      metadata.mime_type = mime;
+      metadata.size_bytes = bytes.size();
+      metadata.width.reset();
+      metadata.height.reset();
+      metadata.duration_ms.reset();
+      if (sticker->format == obcx::telegram::bot::StickerFormat::VideoWebm &&
+          mime == "image/gif") {
+        if (metadata.filename)
+          metadata.filename = std::filesystem::path(*metadata.filename)
+                                  .replace_extension(".gif")
+                                  .string();
+        co_return PreparedTelegramMedia{
+            domain::Animation{
+                domain::BytesSource{std::move(bytes), std::move(metadata)},
+                std::move(caption)},
+            prepared_bytes};
+      }
+      if (sticker->format == obcx::telegram::bot::StickerFormat::StaticWebp &&
+          (mime == "image/png" || mime == "image/jpeg")) {
+        const std::string_view encoded(
+            reinterpret_cast<const char *>(bytes.data()), bytes.size());
+        const auto inspected = qq::inspect_photo_dimensions(encoded);
+        if ((mime == "image/png" && !static_png_dimensions(bytes)) ||
+            inspected.status == qq::PhotoDimensionStatus::UnsafeDimensions ||
+            inspected.status == qq::PhotoDimensionStatus::InvalidDimensions)
+          throw std::runtime_error("sticker cache is not a safe static image");
+        if (metadata.filename)
+          metadata.filename =
+              std::filesystem::path(*metadata.filename)
+                  .replace_extension(mime == "image/png" ? ".png" : ".jpg")
+                  .string();
+        co_return PreparedTelegramMedia{
+            domain::Image{
+                domain::BytesSource{std::move(bytes), std::move(metadata)},
+                std::move(caption)},
+            prepared_bytes};
+      }
+      OBCX_WARN("贴纸缓存格式不受目标支持，保留文字提示");
+    }
+  } catch (const TelegramCacheScopeMismatch &) {
+    throw;
+  } catch (const std::exception &error) {
+    rethrow_if_cancelled(error);
+    OBCX_WARN("贴纸字节准备失败，保留文字提示: {}", error.what());
+  }
+  domain::RichText fallback{domain::Text{sticker_label(*sticker, tgs), {}}};
+  for (auto &span : caption)
+    fallback.push_back(std::move(span));
+  co_return PreparedTelegramMedia{std::move(fallback), prepared_bytes};
+}
 } // namespace bridge::telegram

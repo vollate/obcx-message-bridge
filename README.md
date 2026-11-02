@@ -15,10 +15,10 @@ failed attempts emit `bridge::events::MessageForwarded` and
 - ABI: `2`
 - CMake target and artifact: `bridge_actor`, `bridge.so`
 - Platforms: Linux x86_64 and arm64
-- Runtime dependency: `onebot-cxx.message-store >=0.1.0,<1.0.0`
+- Runtime dependency: `onebot-cxx.message-store >=0.2.1,<0.3.0`
 
 `OBCX_ACTOR_EXPORT_V2` exports the numeric ABI generation, factory,
-destructor, actor name, actor version, and generated schema-2 input contract.
+destructor, actor name, actor version, and generated schema-3 input contract.
 OBCX validates that contract before constructing the actor.
 
 ## Build Against An Installed SDK

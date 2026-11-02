@@ -1,83 +1,70 @@
 #pragma once
 
+#include "bridge_delivery_sender.hpp"
+
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <chrono>
-#include <common/message_type.hpp>
+#include <core/actor/actor_messages.hpp>
+#include <core/bot/domain_events.hpp>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <tuple>
 #include <utility>
 #include <vector>
 
+namespace bridge {
+class BridgeCommandOperations;
+}
+
 namespace bridge::telegram {
 
-/**
- * @brief Buffer for Telegram media-group (album) messages.
- *
- * Telegram delivers a media-group as several distinct Update events that share
- * the same `media_group_id` field. Forwarding each one independently would
- * produce N separate QQ messages instead of a single message containing every
- * image. This buffer collects events keyed by (chat_id, media_group_id) and,
- * after a short debounce window in which no new events arrive, calls back the
- * supplied flush function with the full batch so the caller can build a single
- * combined QQ message.
- *
- * Thread-safe.
- */
+// The actual notification and publication identity. No reconstructed native
+// MessageEvent or second copy of its source can diverge across suspension.
+struct BufferedTelegramMessage {
+  obcx::message_store::events::MessageStored stored;
+  BridgeDeliveryPublication publication;
+  [[nodiscard]] auto source() const -> const obcx::bot::MessageReceived & {
+    return stored.message;
+  }
+  void validate(const BridgeCommandOperations &) const;
+};
+
+// Thread-safe debounce buffer keyed by the whole scoped MediaGroupRef. A flush
+// is an observed batch, not proof that all native album members have arrived.
 class TGMediaGroupBuffer
     : public std::enable_shared_from_this<TGMediaGroupBuffer> {
 public:
-  using FlushFn = std::function<void(std::vector<obcx::common::MessageEvent>)>;
-
-  /// Debounce window: how long to wait for additional messages in a group
-  /// before flushing. Telegram sends the album updates back-to-back, so 1.5s
-  /// is comfortably above any inter-message gap while keeping perceived
-  /// latency low.
+  using FlushFn = std::function<void(std::vector<BufferedTelegramMessage>)>;
   static constexpr std::chrono::milliseconds kDebounceWindow{1500};
 
   explicit TGMediaGroupBuffer(boost::asio::any_io_executor executor);
   ~TGMediaGroupBuffer();
-
   TGMediaGroupBuffer(const TGMediaGroupBuffer &) = delete;
   auto operator=(const TGMediaGroupBuffer &) -> TGMediaGroupBuffer & = delete;
 
-  /**
-   * @brief Append an event to the buffer for its (chat, media_group_id) key.
-   *
-   * Each call resets the debounce timer for that group. When the timer fires,
-   * `flush_fn` is invoked once with all events accumulated so far.
-   */
-  void add(std::string source_installation, obcx::common::MessageEvent event,
-           FlushFn flush_fn);
-
-  /**
-   * @brief Flush all currently buffered groups synchronously.
-   *
-   * Called during actor shutdown to ensure no group is silently dropped if
-   * its debounce timer was still pending. Each group's stored callback is
-   * invoked exactly once on the calling thread.
-   */
+  // Distinct members retain arrival order; duplicate MessageRefs neither
+  // replace the first observation nor postpone its timer indefinitely.
+  void add(std::string source_installation, BufferedTelegramMessage message,
+           FlushFn flush_fn,
+           obcx::core::ActorGenerationLifecycle::WorkLease lease);
   void flush_all_now();
 
 private:
-  using GroupKey =
-      std::tuple<std::string, std::string, std::string>; // bot, chat, mgid
-
+  // SDK serialization of the entire group value; not a new persistence key.
+  using GroupKey = std::string;
   struct Group {
-    std::vector<obcx::common::MessageEvent> events;
+    std::vector<BufferedTelegramMessage> events;
     FlushFn flush_fn;
     std::unique_ptr<boost::asio::steady_timer> timer;
+    std::shared_ptr<const bool> timer_generation;
   };
-
-  void on_timer_fired_(GroupKey key);
+  void on_timer_fired_(GroupKey key, std::shared_ptr<const bool> generation);
 
   boost::asio::any_io_executor executor_;
   mutable std::mutex mutex_;
   std::map<GroupKey, Group> groups_;
 };
-
 } // namespace bridge::telegram

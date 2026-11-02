@@ -1,159 +1,162 @@
 #include "telegram/media_group_buffer.hpp"
+#include "bridge_command_operations.hpp"
 
-#include <boost/asio/post.hpp>
+#include <algorithm>
 #include <boost/system/error_code.hpp>
 #include <common/logger.hpp>
+#include <core/bot/domain_codec.hpp>
 #include <utility>
 
 namespace bridge::telegram {
-
 namespace {
-
-/// Pull the media_group_id out of the raw Telegram update stored on
-/// MessageEvent.data. obcx_core's `common::MessageEvent` does not carry the
-/// field directly, so we read it from the unparsed update payload (the
-/// adapter copies the whole `message` object into `event.data`). Telegram
-/// transmits media_group_id as a string of digits; tolerate a numeric form
-/// for robustness.
-auto extract_media_group_id(const obcx::common::MessageEvent &event)
-    -> std::string {
-  if (!event.data.contains("media_group_id")) {
-    return {};
+void report_flush_failure(const char *message) noexcept {
+  try {
+    OBCX_ERROR("{}", message);
+  } catch (...) {
+    // Diagnostics must not discard another accepted batch or escape teardown.
   }
-  const auto &v = event.data["media_group_id"];
-  if (v.is_string()) {
-    return v.get<std::string>();
-  }
-  if (v.is_number_integer()) {
-    return std::to_string(v.get<int64_t>());
-  }
-  if (v.is_number_unsigned()) {
-    return std::to_string(v.get<uint64_t>());
-  }
-  return {};
 }
-
 } // namespace
+
+void BufferedTelegramMessage::validate(
+    const BridgeCommandOperations &operations) const {
+  source().validate();
+  stored.source.validate(stored.message);
+  if (source().message.conversation.installation !=
+          operations.telegram_installation() ||
+      stored.source.source_platform != "telegram" ||
+      stored.source.source_bot !=
+          operations.telegram_installation().installation_id)
+    throw std::invalid_argument("Telegram original source carrier mismatch");
+  if (publication.event_id.empty() ||
+      publication.source_bot != stored.source.source_bot)
+    throw std::invalid_argument("Telegram publication carrier mismatch");
+}
 
 TGMediaGroupBuffer::TGMediaGroupBuffer(boost::asio::any_io_executor executor)
     : executor_(std::move(executor)) {}
 
 TGMediaGroupBuffer::~TGMediaGroupBuffer() {
-  // Defensive: the owner is expected to call flush_all_now() during shutdown
-  // before destroying the buffer, but if it didn't, drain anything left so we
-  // don't leak buffered events. Timers are cancelled implicitly when their
-  // unique_ptr is destroyed with the map.
   try {
-    flush_all_now();
+    // Owners explicitly flush accepted batches during stop. Destruction only
+    // cancels waits; it must never create provider work.
+    std::scoped_lock lock(mutex_);
+    for (auto &[key, group] : groups_) {
+      (void)key;
+      if (group.timer)
+        group.timer->cancel();
+    }
+    groups_.clear();
   } catch (...) {
-    // Destructors never throw.
+    // Destructors cannot propagate failures.
   }
 }
 
-void TGMediaGroupBuffer::add(std::string source_installation,
-                             obcx::common::MessageEvent event,
-                             FlushFn flush_fn) {
-  const std::string mgid = extract_media_group_id(event);
-  if (mgid.empty()) {
-    // Caller should have checked, but handle gracefully: if there's no
-    // media_group_id we can't key the buffer; flush this single event right
-    // away through the callback.
+void TGMediaGroupBuffer::add(
+    std::string source_installation, BufferedTelegramMessage message,
+    FlushFn flush_fn, obcx::core::ActorGenerationLifecycle::WorkLease lease) {
+  if (!lease)
+    throw std::invalid_argument(
+        "album timer requires a generation drain lease");
+  message.source().validate();
+  const auto &installation = message.source().message.conversation.installation;
+  if (installation.installation_id != source_installation ||
+      installation.surface != obcx::bot::SurfaceId{"telegram.bot_api"})
+    throw std::invalid_argument("Telegram album source installation mismatch");
+  if (!message.source().media_group) {
     if (flush_fn) {
-      std::vector<obcx::common::MessageEvent> single;
-      single.push_back(std::move(event));
+      std::vector<BufferedTelegramMessage> single;
+      single.push_back(std::move(message));
       flush_fn(std::move(single));
     }
     return;
   }
-
-  GroupKey key{std::move(source_installation), event.group_id.value_or(""),
-               mgid};
-
+  GroupKey key = obcx::bot::Json(*message.source().media_group).dump();
   std::scoped_lock lock(mutex_);
   auto &group = groups_[key];
-  group.events.push_back(std::move(event));
-  // Always overwrite the callback with the latest one. The captured bot
-  // pointers are stable for the actor's lifetime, so any of the calls yields
-  // an equivalent functor; we just ensure the most recent capture is what
-  // fires.
+  if (std::ranges::any_of(group.events, [&](const auto &existing) {
+        return existing.source().message == message.source().message;
+      }))
+    return;
+  group.events.push_back(std::move(message));
   group.flush_fn = std::move(flush_fn);
-
-  if (!group.timer) {
+  if (!group.timer)
     group.timer = std::make_unique<boost::asio::steady_timer>(executor_);
-  }
   group.timer->expires_after(kDebounceWindow);
-
+  // A success handler may already be queued when expires_after cancels its
+  // predecessor. A unique arm token also fences erase/recreate of the same key.
+  auto generation = std::make_shared<const bool>(false);
+  group.timer_generation = generation;
   std::weak_ptr<TGMediaGroupBuffer> weak_self = weak_from_this();
-  group.timer->async_wait(
-      [weak_self, key](const boost::system::error_code &ec) {
-        if (ec == boost::asio::error::operation_aborted) {
-          return; // Re-armed by another add(), or buffer being shut down.
-        }
-        auto self = weak_self.lock();
-        if (!self) {
+  obcx::core::ActorGenerationLifecycle::wait_owned(
+      *group.timer, std::move(lease),
+      [weak_self, key, generation](const boost::system::error_code &ec) {
+        // The core-owned outer handler retains the drain pin through
+        // destruction of this DSO-owned callback, including cancelled arms.
+        if (ec == boost::asio::error::operation_aborted)
           return;
-        }
-        self->on_timer_fired_(key);
+        auto self = weak_self.lock();
+        if (self)
+          self->on_timer_fired_(key, generation);
       });
 }
 
-void TGMediaGroupBuffer::on_timer_fired_(GroupKey key) {
-  std::vector<obcx::common::MessageEvent> events;
+void TGMediaGroupBuffer::on_timer_fired_(
+    GroupKey key, std::shared_ptr<const bool> generation) {
+  std::vector<BufferedTelegramMessage> events;
   FlushFn fn;
   {
     std::scoped_lock lock(mutex_);
     auto it = groups_.find(key);
-    if (it == groups_.end()) {
-      return; // Already flushed (e.g. via flush_all_now).
-    }
+    if (it == groups_.end() || it->second.timer_generation != generation)
+      return;
     events = std::move(it->second.events);
     fn = std::move(it->second.flush_fn);
     groups_.erase(it);
   }
-
   if (fn && !events.empty()) {
     try {
       fn(std::move(events));
-    } catch (const std::exception &e) {
-      OBCX_ERROR("Media group flush callback threw: {}", e.what());
+    } catch (...) {
+      report_flush_failure("Media group flush callback failed; no replay");
     }
   }
 }
 
 void TGMediaGroupBuffer::flush_all_now() {
-  std::vector<std::pair<std::vector<obcx::common::MessageEvent>, FlushFn>>
-      pending;
+  // Transfer complete groups without allocating a second batch collection.
+  // Removing their keys also fences already-queued timer completions. Each
+  // group's callback retains its original drain lease through its own flush.
+  decltype(groups_) pending;
   {
     std::scoped_lock lock(mutex_);
-    for (auto &kv : groups_) {
-      auto &group = kv.second;
-      if (group.timer) {
-        // Cancel rather than destroy first, so any handler that already
-        // hopped onto the io_context sees operation_aborted and returns.
+    pending.swap(groups_);
+  }
+  if (!pending.empty()) {
+    try {
+      OBCX_INFO("Flushing {} pending Telegram media groups synchronously",
+                pending.size());
+    } catch (...) {
+      // Logging cannot prevent accepted work from reaching its flush callback.
+    }
+  }
+  for (auto &[key, group] : pending) {
+    (void)key;
+    if (group.timer) {
+      try {
         group.timer->cancel();
-      }
-      if (!group.events.empty()) {
-        pending.emplace_back(std::move(group.events),
-                             std::move(group.flush_fn));
+      } catch (...) {
+        report_flush_failure("Media group timer cancellation failed");
       }
     }
-    groups_.clear();
-  }
-
-  if (!pending.empty()) {
-    OBCX_INFO("Flushing {} pending Telegram media groups synchronously",
-              pending.size());
-  }
-
-  for (auto &[events, fn] : pending) {
-    if (fn && !events.empty()) {
+    if (group.flush_fn && !group.events.empty()) {
       try {
-        fn(std::move(events));
-      } catch (const std::exception &e) {
-        OBCX_ERROR("Media group sync flush callback threw: {}", e.what());
+        group.flush_fn(std::move(group.events));
+      } catch (...) {
+        report_flush_failure(
+            "Media group sync flush callback failed; no replay");
       }
     }
   }
 }
-
 } // namespace bridge::telegram

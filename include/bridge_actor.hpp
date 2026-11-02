@@ -17,6 +17,7 @@
 namespace bridge {
 
 class ReceivedMessageRepository;
+class BridgeDeliveryRetryWorker;
 struct BridgeConfig;
 
 } // namespace bridge
@@ -116,6 +117,10 @@ public:
               const obcx::core::MessageEnvelope &message,
               obcx::core::ActorContext &context)
       -> obcx::core::ActorTask<obcx::core::ActorResult>;
+  auto handle(const obcx::core::events::BotSendConfirmedEvent &event,
+              const obcx::core::MessageEnvelope &message,
+              obcx::core::ActorContext &context)
+      -> obcx::core::ActorTask<obcx::core::ActorResult>;
   auto handle(const obcx::core::events::BotMessageSentEvent &event,
               const obcx::core::MessageEnvelope &message,
               obcx::core::ActorContext &context)
@@ -168,6 +173,7 @@ private:
   std::shared_ptr<const BridgeConfig> config_;
   std::shared_ptr<BridgeStateRepository> repository_;
   std::shared_ptr<IBridgeForwarder> forwarder_;
+  std::shared_ptr<BridgeDeliveryRetryWorker> delivery_retry_worker_;
   std::shared_ptr<ReceivedMessageRepository> received_message_repository_;
   std::recursive_mutex runtime_mutex_;
 };

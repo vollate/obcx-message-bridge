@@ -1,6 +1,6 @@
 #pragma once
 
-#include "bridge_bot_operations.hpp"
+#include "bridge_command_operations.hpp"
 
 #include <boost/asio.hpp>
 #include <common/message_type.hpp>
@@ -18,38 +18,38 @@ namespace bridge::telegram {
 class TelegramCommandHandler {
 public:
   explicit TelegramCommandHandler(
-      std::shared_ptr<BridgeBotOperations> operations,
+      std::shared_ptr<BridgeCommandOperations> operations,
+      std::size_t maximum_image_bytes,
       std::shared_ptr<bridge::BridgeStateRepository> state_repository = nullptr,
       std::shared_ptr<bridge::ReceivedMessageRepository>
           received_message_repository = nullptr,
       std::shared_ptr<obcx::core::BlockingExecutor> blocking_executor =
           nullptr);
 
-  auto handle_recall_command(obcx::common::MessageEvent event,
+  auto handle_recall_command(BridgeCommandSource source,
                              std::string_view qq_group_id)
       -> boost::asio::awaitable<void>;
-  auto handle_bridge_status_command(obcx::common::MessageEvent event,
-                                    std::string_view qq_group_id)
+  auto handle_bridge_status_command(obcx::bot::MessageRef source)
       -> boost::asio::awaitable<void>;
-  auto handle_userinfo_command(obcx::common::MessageEvent event,
+  auto handle_userinfo_command(BridgeCommandSource source,
                                std::string_view qq_group_id,
                                std::string arguments)
       -> boost::asio::awaitable<void>;
-  auto handle_reaction_command(obcx::common::MessageEvent event,
+  auto handle_reaction_command(BridgeCommandSource source,
                                std::string_view qq_group_id,
                                std::string arguments, bool set)
       -> boost::asio::awaitable<void>;
-  auto handle_poke_command(obcx::common::MessageEvent event,
+  auto handle_poke_command(BridgeCommandSource source,
                            std::string_view qq_group_id)
       -> boost::asio::awaitable<void>;
 
 private:
-  auto send_reply_message(const std::string &telegram_group_id,
-                          const std::string &reply_to_message_id,
-                          const std::string &text)
+  void validate_source(const BridgeCommandSource &source) const;
+  auto send_reply_message(obcx::bot::MessageRef source, std::string text)
       -> boost::asio::awaitable<void>;
 
-  std::shared_ptr<BridgeBotOperations> operations_;
+  std::shared_ptr<BridgeCommandOperations> operations_;
+  std::size_t maximum_image_bytes_;
   std::shared_ptr<bridge::BridgeStateRepository> state_repository_;
   std::shared_ptr<bridge::ReceivedMessageRepository>
       received_message_repository_;
