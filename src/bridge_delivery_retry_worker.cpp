@@ -253,6 +253,12 @@ auto BridgeDeliveryRetryWorker::run(
     try {
       auto ids = co_await self->blocking_->run(
           [repository = self->repository_, maximum = self->maximum_per_poll_] {
+            try {
+              (void)repository->prune_terminal_retry_payloads(maximum);
+            } catch (...) {
+              warn_retained("Terminal retry payload cleanup deferred; retry "
+                            "discovery remains available");
+            }
             return repository->list_ready_retry_deliveries(now_ms(), maximum);
           });
       for (const auto &id : ids) {

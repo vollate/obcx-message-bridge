@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -77,7 +78,13 @@ public:
                             const std::string &attempt_id,
                             const ledger::SourceMember &member,
                             const ledger::PhysicalOutput &proven_output);
+  // Hold before admitting/storing an initial request, until an attempt is
+  // admitted. The shared repository protects this preparation from sweeping.
+  [[nodiscard]] auto hold_preparing_delivery(const std::string &delivery_id)
+      -> std::shared_ptr<void>;
   // Only Created authorizes a provider call. AlreadyExists NEVER authorizes it.
+  // Created also registers local in-flight ownership, released by settlement
+  // or explicitly after an invocation exits without a durable result.
   auto admit_attempt(const std::string &delivery_id,
                      const std::string &attempt_id, std::int64_t started_at_ms)
       -> ledger::AdmissionResult;
@@ -86,6 +93,10 @@ public:
                            const std::string &attempt_id,
                            std::int64_t started_at_ms)
       -> ledger::AdmissionResult;
+  // Local ownership only: never fabricates an outcome or authorizes a retry.
+  // Call only when this attempt's invocation has ended. No database I/O.
+  void release_retry_attempt_ownership(const std::string &delivery_id,
+                                       const std::string &attempt_id) noexcept;
   void record_confirmation(const std::string &delivery_id,
                            const std::string &attempt_id,
                            const ledger::PhysicalOutput &output);
@@ -166,6 +177,14 @@ public:
       -> std::vector<std::string>;
   void store_retry_payload(const std::string &delivery_id,
                            const ledger::RetryPayload &payload);
+  // Remove only redundant bodies for reconciled Complete deliveries. Keep all
+  // admission/attempt/output evidence; the explicit limit bounds each batch.
+  auto prune_completed_retry_payloads(std::int64_t limit) -> std::int64_t;
+  // Clear only inactive, non-resumable bodies; preserve a safe retry with
+  // remaining attempts. An inactive unresolved attempt is not replayed.
+  auto reclaim_terminal_retry_payload(const std::string &delivery_id) -> bool;
+  // Visit at most limit IDs, continuing across polls to avoid starvation.
+  auto prune_terminal_retry_payloads(std::int64_t limit) -> std::int64_t;
 
   auto save_or_update_user(const storage::UserInfo &user_info,
                            bool force_update = false) -> bool;
@@ -216,6 +235,10 @@ public:
       -> std::optional<storage::PlatformHeartbeatInfo>;
 
 private:
+  struct RetryActivity;
+  void track_retry_attempt(const std::string &delivery_id,
+                           const std::string &attempt_id);
+  std::shared_ptr<RetryActivity> retry_activity_;
   obcx::core::DbManager &db_manager_;
   std::string db_instance_;
   std::string db_namespace_;

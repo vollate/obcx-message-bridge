@@ -70,8 +70,12 @@ auto QQEventHandler::handle_recall_event(obcx::bot::MessageDeleted deleted)
     // configured spelling, not a group ID guessed from the archive payload.
     const auto qq_group_id =
         operations_->onebot11_group_id(deleted.message.conversation);
+    // Notice ingress includes conversations that this pair does not bridge.
+    // Ignore them before archive reads or provider operations.
+    if (!qq_group_id)
+      co_return;
     const auto [telegram_group_id, topic_id] =
-        config_->tg_group_and_topic_id(operations_->pair_id(), qq_group_id);
+        config_->tg_group_and_topic_id(operations_->pair_id(), *qq_group_id);
     const auto *route =
         config_->bridge_config(operations_->pair_id(), telegram_group_id);
     if (telegram_group_id.empty() || route == nullptr) {
@@ -141,9 +145,11 @@ auto QQEventHandler::handle_recall_event(obcx::bot::MessageDeleted deleted)
       OBCX_DEBUG("QQ recall already admitted; no provider replay");
   } catch (const BridgeRecallPropagationFailure &) {
     throw;
-  } catch (const std::exception &) {
+  } catch (const std::exception &error) {
     throw BridgeRecallPropagationFailure(
-        "QQ recall preparation failed; no automatic retry", std::nullopt);
+        fmt::format("QQ recall preparation failed; no automatic retry: {}",
+                    error.what()),
+        std::nullopt);
   }
 }
 

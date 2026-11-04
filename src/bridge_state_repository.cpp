@@ -7,12 +7,46 @@
 #include <chrono>
 #include <cstdint>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <variant>
 
 namespace bridge {
+
+// Shared by the sender and retry worker of this generation. Never wait for a
+// DB job while holding this mutex: writer callbacks take it after DB admission.
+struct BridgeStateRepository::RetryActivity {
+  std::mutex mutex;
+  std::unordered_map<std::string, std::size_t> preparing;
+  std::unordered_map<std::string, std::unordered_set<std::string>> attempts;
+  std::optional<std::string> sweep_after;
+
+  auto busy(const std::string &id) const -> bool {
+    return preparing.contains(id) || attempts.contains(id);
+  }
+
+  struct Preparation {
+    std::shared_ptr<RetryActivity> activity;
+    std::string id;
+    Preparation(std::shared_ptr<RetryActivity> state, std::string delivery)
+        : activity(std::move(state)), id(std::move(delivery)) {
+      std::scoped_lock lock(activity->mutex);
+      ++activity->preparing[id];
+    }
+    Preparation(const Preparation &) = delete;
+    auto operator=(const Preparation &) -> Preparation & = delete;
+    ~Preparation() {
+      std::scoped_lock lock(activity->mutex);
+      const auto entry = activity->preparing.find(id);
+      if (--entry->second == 0)
+        activity->preparing.erase(entry);
+    }
+  };
+};
+
 namespace {
 
 constexpr std::string_view kSchemaTable = "bridge_schema_version";
@@ -232,13 +266,45 @@ void require_installation(const std::string &installation,
 BridgeStateRepository::BridgeStateRepository(obcx::core::DbManager &db_manager,
                                              std::string db_instance,
                                              std::string db_namespace)
-    : db_manager_(db_manager), db_instance_(std::move(db_instance)),
+    : retry_activity_(std::make_shared<RetryActivity>()),
+      db_manager_(db_manager), db_instance_(std::move(db_instance)),
       db_namespace_(std::move(db_namespace)) {
   if (db_instance_.empty()) {
     throw std::invalid_argument("Bridge DB instance cannot be empty");
   }
   if (db_namespace_.empty()) {
     throw std::invalid_argument("Bridge DB namespace cannot be empty");
+  }
+}
+
+auto BridgeStateRepository::hold_preparing_delivery(const std::string &id)
+    -> std::shared_ptr<void> {
+  if (id.empty())
+    throw std::invalid_argument("empty preparing delivery identity");
+  return std::make_shared<RetryActivity::Preparation>(retry_activity_, id);
+}
+
+void BridgeStateRepository::track_retry_attempt(const std::string &id,
+                                                const std::string &attempt) {
+  std::scoped_lock lock(retry_activity_->mutex);
+  const auto [entry, inserted] = retry_activity_->attempts.try_emplace(id);
+  try {
+    entry->second.insert(attempt);
+  } catch (...) {
+    if (inserted)
+      retry_activity_->attempts.erase(entry);
+    throw;
+  }
+}
+
+void BridgeStateRepository::release_retry_attempt_ownership(
+    const std::string &id, const std::string &attempt) noexcept {
+  std::scoped_lock lock(retry_activity_->mutex);
+  const auto entry = retry_activity_->attempts.find(id);
+  if (entry != retry_activity_->attempts.end()) {
+    entry->second.erase(attempt);
+    if (entry->second.empty())
+      retry_activity_->attempts.erase(entry);
   }
 }
 

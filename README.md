@@ -353,6 +353,16 @@ upsert.
 
 ### Message retry operations
 
+Schema-5 typed-ledger retry discovery pages IDs and checks retry safety before
+loading bodies; it decodes full payloads only for the bounded selected work.
+See [retry-scan memory behavior and offline measurements](docs/retry-scan-memory.md).
+Retry bodies are reclaimed when the workflow terminates: success, nonretryable
+failure, exhausted attempts, or ended uncertain/partial sends. Preparing and
+in-flight work stays protected, and safe retries with remaining budget keep their
+bodies. Bounded historical sweeps use the existing worker. Admission, attempt and
+output fences remain intact; body deletion never authorizes another send. See
+[cleanup rules and safety evidence](docs/retry-payload-cleanup.md).
+
 When `enable_retry_queue` is `true`, one worker belongs to the active bridge
 actor generation. A definitely-not-submitted, retryable QQ-to-Telegram or
 Telegram-to-QQ failure is stored in `bridge_message_retry_queue`; the worker

@@ -5,6 +5,8 @@
 #include "bridge_hash.hpp"
 #include "bridge_state_repository.hpp"
 #include <boost/asio/this_coro.hpp>
+#include <boost/scope/scope_exit.hpp>
+#include <common/logger.hpp>
 #include <type_traits>
 #include <variant>
 
@@ -319,6 +321,7 @@ auto send_bridge_delivery(
       request.retry_policy
           ? std::optional{detail::prepare_delivery_retry(request, 0, 0)}
           : std::nullopt;
+  auto preparing = repository->hold_preparing_delivery(request.delivery_id);
   const auto admitted = co_await blocking->run([repository, admission,
                                                 album_policy =
                                                     request.album_policy,
@@ -362,13 +365,21 @@ auto send_bridge_delivery(
     co_await blocking->run([repository, id = request.delivery_id, retry] {
       repository->store_retry_payload(id, *retry);
     });
-  const auto attempt = co_await blocking->run(
-      [repository, id = request.delivery_id, attempt = request.attempt_id,
-       started = now_ms()] {
+  const auto active_attempt = request.attempt_id;
+  const auto attempt =
+      co_await blocking->run([repository, id = request.delivery_id,
+                              attempt = active_attempt, started = now_ms()] {
         return repository->admit_attempt(id, attempt, started);
       });
   if (attempt != ledger::AdmissionResult::Created)
     throw std::runtime_error("existing attempt does not authorize submission");
+  // Cover failure to allocate/enter the submit coroutine as well as its exits.
+  auto retire = boost::scope::make_scope_exit([&]() noexcept {
+    repository->release_retry_attempt_ownership(admission.delivery_id,
+                                                active_attempt);
+  });
+  // Created registered the attempt in the same writer job; no unowned gap.
+  preparing.reset();
 
   // An admitted attempt must reach the submit owner's cancellation-aware
   // settlement even if cancellation arrived during the joined DB admission.
@@ -378,8 +389,8 @@ auto send_bridge_delivery(
   std::exception_ptr error;
   try {
     result = co_await detail::submit_delivery_attempt(
-        std::move(gateway), std::move(repository), std::move(blocking),
-        std::move(request), 1, {}, std::move(failure_notification));
+        std::move(gateway), repository, std::move(blocking), std::move(request),
+        1, {}, std::move(failure_notification));
   } catch (...) {
     error = std::current_exception();
   }
@@ -397,6 +408,12 @@ auto detail::submit_delivery_attempt(
     obcx::core::ActorGenerationLifecycle::TokenPtr token,
     obcx::core::MessageEnvelope failure_notification)
     -> boost::asio::awaitable<BridgeDeliveryResult> {
+  // Also release on unexpected exits before the explicit error cleanup below.
+  // The destructor performs local bookkeeping only, never blocking DB I/O.
+  auto retire = boost::scope::make_scope_exit([&]() noexcept {
+    repository->release_retry_attempt_ownership(request.delivery_id,
+                                                request.attempt_id);
+  });
   auto association = correlation(request);
   // Sole provider call, only after durable Created admission. An exception or
   // persistence failure leaves the admitted attempt uncertain, never missing.
@@ -449,11 +466,28 @@ auto detail::submit_delivery_attempt(
       persistence_failed = true;
     }
   }
+  if (invocation_error || persistence_failed) {
+    // The invocation has ended, but never invent a no-effect result for an
+    // exception. Retain its unresolved ledger fence and discard only its body.
+    repository->release_retry_attempt_ownership(request.delivery_id,
+                                                request.attempt_id);
+    try {
+      co_await blocking->run([repository, id = request.delivery_id] {
+        (void)repository->reclaim_terminal_retry_payload(id);
+      });
+    } catch (...) {
+      try {
+        OBCX_WARN("Terminal retry payload cleanup deferred; original failure "
+                  "retained");
+      } catch (...) {
+      }
+    }
+  }
   co_await boost::asio::this_coro::throw_if_cancelled(previous);
   if (invocation_error)
     std::rethrow_exception(invocation_error);
   if (persistence_failed || !persisted.second)
-    throw BridgeDeliveryPersistenceFailure(std::move(request.delivery_id),
+    throw BridgeDeliveryPersistenceFailure(request.delivery_id,
                                            std::move(outcome),
                                            std::move(failure_notification));
   const bool publish =

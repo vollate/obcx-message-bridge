@@ -770,6 +770,58 @@ void validate_retry(const ledger::Admission &admission,
     throw std::invalid_argument("retry scope/count does not match admission");
   }
 }
+// Run on the serialized DB writer, after excluding locally owned work. New
+// attempts register on that same writer before admission completes. Never hold
+// the activity mutex across SQL: releasing ownership must not block the
+// reactor.
+auto discard_retry_payload(obcx::core::IDbConnection &db, const std::string &id,
+                           bool completed_only) -> bool {
+  if (db.query("SELECT delivery_id FROM bridge_delivery_retries WHERE "
+               "delivery_id=?;",
+               {id})
+          .empty())
+    return false;
+  // Never decode the large retry payload. Reconcile metadata and preserve the
+  // body only while whole-delivery retry is still permitted. Inactive pending
+  // attempts are abandoned/unknown, not permission to invoke the provider.
+  try {
+    const auto admission = admission_from_db(db, id);
+    if (admission.delivery_id != id)
+      return false;
+    const auto counts = db.query(
+        "SELECT (SELECT COUNT(*) FROM bridge_delivery_outputs WHERE "
+        "delivery_id=?) + (SELECT COUNT(*) FROM bridge_revision_outputs WHERE "
+        "delivery_id=?) AS output_count;",
+        {id, id});
+    const auto count = db_int64(counts.front(), "output_count");
+    const auto state =
+        original_delivery_state(db, id, static_cast<std::size_t>(count));
+    if (completed_only) {
+      if (count <= 0 || state != ledger::DeliveryState::Complete)
+        return false;
+    } else if (state == ledger::DeliveryState::Failed &&
+               safe_retry(db, admission)) {
+      return false;
+    }
+  } catch (const std::exception &) {
+    // Missing, legacy or corrupt evidence is not permission to discard data.
+    return false;
+  }
+  db.execute("DELETE FROM bridge_delivery_retries WHERE delivery_id=?;", {id});
+  return true;
+}
+
+struct AttemptRegistration {
+  BridgeStateRepository &repository;
+  const std::string &delivery;
+  const std::string &attempt;
+  bool registered;
+  bool committed;
+  ~AttemptRegistration() {
+    if (registered && !committed)
+      repository.release_retry_attempt_ownership(delivery, attempt);
+  }
+};
 } // namespace
 
 auto BridgeStateRepository::admit_delivery(const ledger::Admission &admission)
@@ -908,7 +960,8 @@ auto BridgeStateRepository::admit_attempt(const std::string &id,
                                           const std::string &attempt,
                                           const std::int64_t started_at_ms)
     -> ledger::AdmissionResult {
-  return db_manager_.run_transaction<ledger::AdmissionResult>(
+  AttemptRegistration registration{*this, id, attempt, false, false};
+  const auto written = db_manager_.run_transaction<ledger::AdmissionResult>(
       db_instance_, [&](obcx::core::IDbConnection &db) {
         require_v4(db);
         if (attempt.empty()) {
@@ -939,14 +992,20 @@ auto BridgeStateRepository::admit_attempt(const std::string &id,
                    "bridge_delivery_attempts(delivery_id,attempt_id,sequence,"
                    "started_at_ms,result) VALUES(?,?,?,?,NULL);",
                    {id, attempt, sequence, started_at_ms});
+        track_retry_attempt(id, attempt);
+        registration.registered = true;
         return ledger::AdmissionResult::Created;
       });
+  registration.committed = true;
+  return written;
 }
 auto BridgeStateRepository::admit_retry_attempt(
     const ledger::Admission &expected_admission,
     const ledger::RetryPayload &expected_payload, const std::string &attempt,
     std::int64_t started_at_ms) -> ledger::AdmissionResult {
-  return db_manager_.run_transaction<ledger::AdmissionResult>(
+  AttemptRegistration registration{*this, expected_admission.delivery_id,
+                                   attempt, false, false};
+  const auto written = db_manager_.run_transaction<ledger::AdmissionResult>(
       db_instance_, [&](obcx::core::IDbConnection &db) {
         require_v4(db);
         const auto &id = expected_admission.delivery_id;
@@ -982,8 +1041,12 @@ auto BridgeStateRepository::admit_retry_attempt(
             "INSERT INTO bridge_delivery_attempts(delivery_id,attempt_id,"
             "sequence,started_at_ms,result) VALUES(?,?,?,?,NULL);",
             {id, attempt, sequence, started_at_ms});
+        track_retry_attempt(id, attempt);
+        registration.registered = true;
         return ledger::AdmissionResult::Created;
       });
+  registration.committed = true;
+  return written;
 }
 void BridgeStateRepository::record_confirmation(
     const std::string &id, const std::string &attempt,
@@ -1012,7 +1075,7 @@ auto BridgeStateRepository::finish_attempt(
     const ledger::AttemptResult &result,
     const std::optional<ledger::RetryPayload> &retry)
     -> ledger::AdmissionResult {
-  return db_manager_.run_transaction<
+  const auto written = db_manager_.run_transaction<
       ledger::AdmissionResult>(db_instance_, [&](obcx::core::IDbConnection
                                                      &db) {
     require_v4(db);
@@ -1109,6 +1172,20 @@ auto BridgeStateRepository::finish_attempt(
     }
     return ledger::AdmissionResult::Created;
   });
+  release_retry_attempt_ownership(id, attempt);
+  try {
+    // Outcome commit precedes best-effort reclamation for every terminal
+    // result, including nonretryable, exhausted, partial and unknown effects.
+    // Another currently owned attempt still prevents reclamation.
+    (void)reclaim_terminal_retry_payload(id);
+  } catch (...) {
+    try {
+      OBCX_WARN("Terminal retry payload cleanup deferred; durable outcome "
+                "retained");
+    } catch (...) {
+    }
+  }
+  return written;
 }
 auto BridgeStateRepository::load_delivery(const std::string &id) const
     -> std::optional<ledger::DeliverySnapshot> {
@@ -2006,41 +2083,205 @@ void BridgeStateRepository::record_output_operation(
                    {id, operation.operation_id, ref, serialized});
       });
 }
+auto BridgeStateRepository::prune_completed_retry_payloads(
+    const std::int64_t limit) -> std::int64_t {
+  if (limit <= 0)
+    throw std::invalid_argument(
+        "retry cleanup requires positive explicit limit");
+  return db_manager_.run_transaction<
+      std::int64_t>(db_instance_, [&](obcx::core::IDbConnection &db) {
+    require_v4(db);
+    // A cheap completion hint selects IDs only. The full reconciliation
+    // above remains authoritative before any payload is deleted.
+    constexpr auto completed_ids =
+        "SELECT r.delivery_id FROM bridge_delivery_retries r JOIN "
+        "bridge_deliveries d ON d.delivery_id=r.delivery_id WHERE "
+        "d.legacy_unknown=0 AND d.admission IS NOT NULL AND EXISTS(SELECT "
+        "1 FROM bridge_delivery_attempts a WHERE "
+        "a.delivery_id=r.delivery_id AND a.sequence=(SELECT MAX(sequence) "
+        "FROM bridge_delivery_attempts WHERE delivery_id=r.delivery_id) "
+        "AND CASE WHEN json_valid(a.result) THEN "
+        "json_extract(a.result,'$.complete') END=1)";
+    std::optional<std::string> after;
+    std::int64_t removed = 0;
+    for (;;) {
+      const auto rows =
+          after
+              ? db.query(
+                    std::string{completed_ids} +
+                        " AND r.delivery_id>? ORDER BY r.delivery_id LIMIT ?;",
+                    {*after, limit})
+              : db.query(std::string{completed_ids} +
+                             " ORDER BY r.delivery_id LIMIT ?;",
+                         {limit});
+      if (rows.empty())
+        return removed;
+      for (const auto &row : rows) {
+        const auto id = db_string(row, "delivery_id");
+        after = id;
+        {
+          std::scoped_lock lock(retry_activity_->mutex);
+          if (retry_activity_->busy(id))
+            continue;
+        }
+        if (discard_retry_payload(db, id, true) && ++removed == limit)
+          return removed;
+      }
+    }
+  });
+}
+
+auto BridgeStateRepository::reclaim_terminal_retry_payload(
+    const std::string &id) -> bool {
+  return db_manager_.run_transaction<bool>(
+      db_instance_, [&](obcx::core::IDbConnection &db) {
+        require_v4(db);
+        {
+          std::scoped_lock lock(retry_activity_->mutex);
+          if (retry_activity_->busy(id))
+            return false;
+        }
+        return discard_retry_payload(db, id, false);
+      });
+}
+
+auto BridgeStateRepository::prune_terminal_retry_payloads(
+    const std::int64_t limit) -> std::int64_t {
+  if (limit <= 0)
+    throw std::invalid_argument(
+        "retry cleanup requires positive explicit limit");
+  return db_manager_.run_transaction<std::int64_t>(
+      db_instance_, [&](obcx::core::IDbConnection &db) {
+        require_v4(db);
+        constexpr auto ids =
+            "SELECT r.delivery_id FROM bridge_delivery_retries r JOIN "
+            "bridge_deliveries d ON d.delivery_id=r.delivery_id WHERE "
+            "d.legacy_unknown=0 AND d.admission IS NOT NULL";
+        std::optional<std::string> after;
+        {
+          std::scoped_lock lock(retry_activity_->mutex);
+          after = retry_activity_->sweep_after;
+        }
+        auto rows =
+            after ? db.query(std::string{ids} + " AND r.delivery_id>? ORDER BY "
+                                                "r.delivery_id LIMIT ?;",
+                             {*after, limit})
+                  : db.query(std::string{ids} +
+                                 " ORDER BY r.delivery_id LIMIT ?;",
+                             {limit});
+        if (rows.empty() && after) {
+          {
+            std::scoped_lock lock(retry_activity_->mutex);
+            retry_activity_->sweep_after.reset();
+          }
+          rows = db.query(std::string{ids} + " ORDER BY r.delivery_id LIMIT ?;",
+                          {limit});
+        }
+        std::int64_t removed = 0;
+        for (const auto &row : rows) {
+          const auto id = db_string(row, "delivery_id");
+          {
+            std::scoped_lock lock(retry_activity_->mutex);
+            // Advance even past active, corrupt or runnable work.
+            retry_activity_->sweep_after = id;
+            if (retry_activity_->busy(id))
+              continue;
+          }
+          if (discard_retry_payload(db, id, false))
+            ++removed;
+        }
+        return removed;
+      });
+}
+
 auto BridgeStateRepository::list_ready_retry_deliveries(
     const std::int64_t ready_at_ms, const std::int64_t limit) const
     -> std::vector<std::string> {
   if (limit <= 0) {
     throw std::invalid_argument("retry list requires positive explicit limit");
   }
-  return db_manager_.run_transaction<std::vector<std::string>>(
-      db_instance_, [&](obcx::core::IDbConnection &db) {
-        require_v4(db);
-        std::vector<std::pair<std::int64_t, std::string>> candidates;
-        for (const auto &row : db.query(
-                 "SELECT delivery_id,payload FROM bridge_delivery_retries;")) {
-          const auto id = db_string(row, "delivery_id");
-          const auto payload = Json::parse(db_string(row, "payload"))
-                                   .get<ledger::RetryPayload>();
-          const auto admission = admission_from_db(db, id);
-          validate_retry(admission, payload);
-          if (payload.next_retry_at_ms > ready_at_ms) {
-            continue;
-          }
-          if (safe_retry(db, admission)) {
-            candidates.emplace_back(payload.next_retry_at_ms, id);
-          }
-        }
-        std::sort(candidates.begin(), candidates.end());
-        std::vector<std::string> result;
-        for (const auto &[time, id] : candidates) {
-          (void)time;
-          if (static_cast<std::int64_t>(result.size()) == limit) {
-            break;
-          }
-          result.push_back(id);
-        }
-        return result;
-      });
+  return db_manager_.run_transaction<std::vector<
+      std::string>>(db_instance_, [&](obcx::core::IDbConnection &db) {
+    require_v4(db);
+    // Retry payloads contain opaque bodies and can be hundreds of MiB.
+    // Never materialize them for the whole queue, or parse completed work
+    // just to discover that it cannot be retried. Page only IDs using the
+    // existing identity indexes; safe_retry remains the authoritative gate.
+    constexpr auto eligible_ids =
+        "SELECT r.delivery_id FROM bridge_delivery_retries r WHERE "
+        "EXISTS(SELECT 1 FROM bridge_delivery_attempts a WHERE "
+        "a.delivery_id=r.delivery_id) AND NOT EXISTS(SELECT 1 FROM "
+        "bridge_delivery_outputs o WHERE o.delivery_id=r.delivery_id)";
+    std::optional<std::string> after;
+    std::vector<std::pair<std::int64_t, std::string>> candidates;
+    for (;;) {
+      const auto rows =
+          after
+              ? db.query(
+                    std::string{eligible_ids} +
+                        " AND r.delivery_id>? ORDER BY r.delivery_id LIMIT ?;",
+                    {*after, limit})
+              : db.query(std::string{eligible_ids} +
+                             " ORDER BY r.delivery_id LIMIT ?;",
+                         {limit});
+      if (rows.empty())
+        break;
+      for (const auto &row : rows) {
+        const auto id = db_string(row, "delivery_id");
+        after = id;
+        const auto admission = admission_from_db(db, id);
+        if (!safe_retry(db, admission))
+          continue;
+        // Project only the scalar schedule into C++. SQLite may inspect
+        // one large JSON value, but no queue-wide payload copies survive.
+        const auto schedule =
+            db.query("SELECT CASE WHEN "
+                     "json_type(payload,'$.next_retry_at_ms')='integer' THEN "
+                     "json_extract(payload,'$.next_retry_at_ms') END AS "
+                     "next_retry_at_ms FROM bridge_delivery_retries WHERE "
+                     "delivery_id=?;",
+                     {id});
+        if (schedule.size() != 1)
+          throw std::runtime_error("retry schedule disappeared");
+        const auto timestamp =
+            std::get_if<std::int64_t>(&schedule.front().at("next_retry_at_ms"));
+        if (timestamp == nullptr)
+          throw std::invalid_argument(
+              "retry schedule must be an integer timestamp");
+        const auto time = *timestamp;
+        if (time > ready_at_ms)
+          continue;
+        const std::pair candidate{time, id};
+        const auto position =
+            std::lower_bound(candidates.begin(), candidates.end(), candidate);
+        // Keep the earliest safe IDs globally, not merely the first page.
+        if (position == candidates.end() &&
+            static_cast<std::int64_t>(candidates.size()) == limit)
+          continue;
+        candidates.insert(position, candidate);
+        if (static_cast<std::int64_t>(candidates.size()) > limit)
+          candidates.pop_back();
+      }
+    }
+    std::vector<std::string> result;
+    for (const auto &[time, id] : candidates) {
+      const auto rows = db.query(
+          "SELECT payload FROM bridge_delivery_retries WHERE delivery_id=?;",
+          {id});
+      if (rows.size() != 1)
+        throw std::runtime_error("retry payload disappeared");
+      // Parse by reference: db_string would copy the entire opaque body.
+      const auto payload =
+          Json::parse(std::get<std::string>(rows.front().at("payload")))
+              .get<ledger::RetryPayload>();
+      const auto admission = admission_from_db(db, id);
+      validate_retry(admission, payload);
+      if (payload.next_retry_at_ms != time || !safe_retry(db, admission))
+        throw std::runtime_error("retry candidate changed during selection");
+      result.push_back(id);
+    }
+    return result;
+  });
 }
 } // namespace bridge
 

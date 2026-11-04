@@ -216,7 +216,8 @@ auto BridgeCommandOperations::onebot11_conversation(
 }
 
 auto BridgeCommandOperations::onebot11_group_id(
-    const obcx::bot::ConversationRef &conversation) const -> std::string {
+    const obcx::bot::ConversationRef &conversation) const
+    -> std::optional<std::string> {
   conversation.validate();
   if (conversation.installation != onebot11_)
     throw std::invalid_argument("QQ observed scope installation mismatch");
@@ -230,8 +231,7 @@ auto BridgeCommandOperations::onebot11_group_id(
     group = &key;
   }
   if (!group)
-    throw std::invalid_argument(
-        "QQ observed scope is not configured for this bridge pair");
+    return std::nullopt;
   return *group;
 }
 

@@ -62,10 +62,13 @@ public:
       -> boost::asio::awaitable<obcx::bot::SendOutcome>;
   [[nodiscard]] auto onebot11_conversation(std::string_view group_id) const
       -> const obcx::bot::ConversationRef &;
-  // Match an observed scope to the original configured key. No opaque-ID
-  // decoding, raw-notice fallback or new reference authority.
+  // Match an observed scope to the original configured key. Unconfigured
+  // conversations return nullopt; invalid, foreign-installation or ambiguous
+  // scopes remain errors. No opaque-ID decoding, raw-notice fallback or new
+  // reference authority.
   [[nodiscard]] auto onebot11_group_id(
-      const obcx::bot::ConversationRef &conversation) const -> std::string;
+      const obcx::bot::ConversationRef &conversation) const
+      -> std::optional<std::string>;
 
   // Explicit configuration/restoration boundaries; never mutation authority.
   [[nodiscard]] auto telegram_conversation(

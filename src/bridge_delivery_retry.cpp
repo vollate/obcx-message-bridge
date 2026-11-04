@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <boost/asio/this_coro.hpp>
+#include <boost/scope/scope_exit.hpp>
 #include <chrono>
 #include <exception>
 #include <limits>
@@ -310,9 +311,10 @@ auto retry_bridge_delivery(
     co_return BridgeDeliveryResult{std::move(*snapshot), std::nullopt, false};
   auto failure_notification = detail::prepare_delivery_failure_notification(
       *snapshot->admission, request.attempt_id);
+  const auto active_attempt = request.attempt_id;
   const auto admitted = co_await blocking->run(
       [repository, admission = *snapshot->admission, payload = *snapshot->retry,
-       attempt = request.attempt_id, started = now_ms()] {
+       attempt = active_attempt, started = now_ms()] {
         return repository->admit_retry_attempt(admission, payload, attempt,
                                                started);
       });
@@ -324,6 +326,9 @@ auto retry_bridge_delivery(
       throw std::runtime_error("retry delivery disappeared");
     co_return BridgeDeliveryResult{std::move(*current), std::nullopt, false};
   }
+  auto retire = boost::scope::make_scope_exit([&]() noexcept {
+    repository->release_retry_attempt_ownership(delivery_id, active_attempt);
+  });
   // Admission is already durable. Cancellation must reach the submit owner's
   // explicit no-send/settlement branch, not throw while entering its awaitable.
   const auto previous = co_await boost::asio::this_coro::throw_if_cancelled();
@@ -332,8 +337,7 @@ auto retry_bridge_delivery(
   std::exception_ptr error;
   try {
     result = co_await detail::submit_delivery_attempt(
-        std::move(gateway), std::move(repository), std::move(blocking),
-        std::move(request),
+        std::move(gateway), repository, std::move(blocking), std::move(request),
         static_cast<std::int64_t>(snapshot->attempts.size()) + 1,
         std::move(token), std::move(failure_notification));
   } catch (...) {
