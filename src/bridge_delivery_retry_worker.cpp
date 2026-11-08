@@ -3,8 +3,11 @@
 #include "bridge_delivery_revision.hpp"
 #include "bridge_state_repository.hpp"
 #include <algorithm>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <common/logger.hpp>
+#include <retry_queue/queue.hpp>
 
 namespace bridge {
 namespace {
@@ -52,6 +55,57 @@ auto now_ms() -> std::int64_t {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::system_clock::now().time_since_epoch())
       .count();
+}
+// The durable ledger owns attempts and backoff. Each discovered ID is only
+// one in-memory execution opportunity; exceptions never authorize a resubmit.
+template <class Payload, class Callable>
+auto run_retry_batch(retry_queue::Strand strand, std::vector<Payload> items,
+                     Callable attempt) -> asio::awaitable<void> {
+  if (items.empty())
+    co_return;
+  // Always enter the queue's cancellation/drain path after admitting work.
+  co_await asio::this_coro::throw_if_cancelled(false);
+  retry_queue::Queue queue({strand, retry_queue::BlockingRunner{}},
+                           {items.size(), 1});
+  std::vector<retry_queue::JobHandle<void>> handles;
+  try {
+    handles.reserve(items.size());
+    for (auto &item : items) {
+      auto job = queue.submit(
+          attempt, std::move(item), {1, std::nullopt},
+          [&queue](const retry_queue::AttemptResult<void> &result,
+                   retry_queue::AttemptContext) {
+            if (!result.exception)
+              return retry_queue::Decision::accept();
+            try {
+              std::rethrow_exception(result.exception);
+            } catch (const std::exception &error) {
+              if (is_bridge_operation_cancelled(error))
+                queue.request_stop(retry_queue::StopMode::Cancel);
+            } catch (...) {
+              queue.request_stop(retry_queue::StopMode::Cancel);
+            }
+            return retry_queue::Decision::reject();
+          },
+          retry_queue::SubmitPosition::Back);
+      if (!job)
+        throw std::runtime_error("Bridge retry batch admission failed");
+      handles.push_back(std::move(*job));
+    }
+  } catch (...) {
+    queue.request_stop(retry_queue::StopMode::Cancel);
+    throw;
+  }
+  co_await queue.run_until_idle();
+  for (auto &handle : handles) {
+    auto completion = co_await handle.wait();
+    if (completion.classifier_exception)
+      std::rethrow_exception(completion.classifier_exception);
+    if (completion.last_result && completion.last_result->exception)
+      std::rethrow_exception(completion.last_result->exception);
+    if (completion.state == retry_queue::JobState::Cancelled)
+      throw boost::system::system_error(asio::error::operation_aborted);
+  }
 }
 } // namespace
 
@@ -246,9 +300,95 @@ void BridgeDeliveryRetryWorker::finished(Lifecycle::TokenPtr token,
     start(std::move(restart));
 }
 
+auto BridgeDeliveryRetryWorker::execute_delivery(
+    std::shared_ptr<BridgeDeliveryRetryWorker> self, Lifecycle::TokenPtr token,
+    std::string id) -> asio::awaitable<void> {
+  if (!token->valid())
+    throw boost::system::system_error(asio::error::operation_aborted);
+  std::optional<obcx::core::MessageEnvelope> failure_notification;
+  try {
+    auto snapshot =
+        co_await self->blocking_->run([repository = self->repository_, id] {
+          return repository->load_delivery(id);
+        });
+    if (!snapshot || !snapshot->retry || !snapshot->safe_to_retry)
+      co_return;
+    const auto route = self->select_route(*snapshot);
+    if (!route || !token->valid())
+      co_return;
+    auto result = co_await retry_bridge_delivery(
+        self->gateway_, self->repository_, self->blocking_, id, *route, token);
+    if (result.newly_completed) {
+      const auto published = co_await publish_bridge_delivery(
+          self->publisher_, token, std::move(result));
+      if (!published)
+        warn_retained("Bridge retry completed but notification was not "
+                      "accepted; no resubmit");
+    }
+  } catch (const BridgeDeliveryPersistenceFailure &error) {
+    failure_notification = bridge_delivery_failure_notification(error);
+  } catch (const std::exception &error) {
+    if (is_bridge_operation_cancelled(error))
+      throw;
+    // Do not reinterpret persistence errors or partial/unknown effects
+    // as a retryable provider failure. The next poll uses ledger state.
+    warn_retained("Typed bridge retry item unavailable or uncertain; ledger "
+                  "retained");
+  }
+  if (failure_notification)
+    co_await publish_failure(self->publisher_, token,
+                             std::move(*failure_notification));
+}
+
+auto BridgeDeliveryRetryWorker::execute_revision(
+    std::shared_ptr<BridgeDeliveryRetryWorker> self, Lifecycle::TokenPtr token,
+    std::pair<std::string, std::string> id) -> asio::awaitable<void> {
+  const auto &[delivery_id, revision_id] = id;
+  if (!token->valid())
+    throw boost::system::system_error(asio::error::operation_aborted);
+  std::optional<obcx::core::MessageEnvelope> failure_notification;
+  try {
+    const auto snapshot = co_await self->blocking_->run(
+        [repository = self->repository_, delivery_id] {
+          return repository->load_delivery(delivery_id);
+        });
+    if (!snapshot)
+      co_return;
+    const auto route = self->select_route(*snapshot);
+    const auto revision =
+        std::ranges::find_if(snapshot->revisions, [&](const auto &entry) {
+          return entry.admission.revision_id == revision_id;
+        });
+    if (!route || revision == snapshot->revisions.end() || !token->valid())
+      co_return;
+    auto result = co_await retry_bridge_revision(
+        self->gateway_, self->repository_, self->blocking_, *revision, *route,
+        token);
+    if (result.newly_completed) {
+      auto notification = bridge_revision_notification(result);
+      const auto published =
+          co_await self->publisher_->publish(token, std::move(notification));
+      if (!published)
+        warn_retained("Bridge edit retry completed without notification "
+                      "acceptance; no resubmit");
+    }
+  } catch (const BridgeRevisionPersistenceFailure &error) {
+    failure_notification = bridge_revision_failure_notification(error.result());
+  } catch (const std::exception &error) {
+    if (is_bridge_operation_cancelled(error))
+      throw;
+    warn_retained("Typed edit retry unavailable or uncertain; durable "
+                  "effects retained");
+  }
+  if (failure_notification)
+    co_await publish_failure(self->publisher_, token,
+                             std::move(*failure_notification));
+}
+
 auto BridgeDeliveryRetryWorker::run(
     std::shared_ptr<BridgeDeliveryRetryWorker> self, Lifecycle::TokenPtr token)
     -> asio::awaitable<void> {
+  const auto strand = asio::make_strand(self->executor_);
   while (token->valid()) {
     try {
       auto ids = co_await self->blocking_->run(
@@ -261,92 +401,28 @@ auto BridgeDeliveryRetryWorker::run(
             }
             return repository->list_ready_retry_deliveries(now_ms(), maximum);
           });
-      for (const auto &id : ids) {
-        if (!token->valid())
-          co_return;
-        std::optional<obcx::core::MessageEnvelope> failure_notification;
-        try {
-          auto snapshot = co_await self->blocking_->run(
-              [repository = self->repository_, id] {
-                return repository->load_delivery(id);
-              });
-          if (!snapshot || !snapshot->retry || !snapshot->safe_to_retry)
-            continue;
-          const auto route = self->select_route(*snapshot);
-          if (!route || !token->valid())
-            continue;
-          auto result = co_await retry_bridge_delivery(
-              self->gateway_, self->repository_, self->blocking_, id, *route,
-              token);
-          if (result.newly_completed) {
-            const auto published = co_await publish_bridge_delivery(
-                self->publisher_, token, std::move(result));
-            if (!published)
-              warn_retained("Bridge retry completed but notification was not "
-                            "accepted; no resubmit");
-          }
-        } catch (const BridgeDeliveryPersistenceFailure &error) {
-          failure_notification = bridge_delivery_failure_notification(error);
-        } catch (const std::exception &error) {
-          if (is_bridge_operation_cancelled(error))
-            co_return;
-          // Do not reinterpret persistence errors or partial/unknown effects
-          // as a retryable provider failure. The next poll uses ledger state.
-          warn_retained(
-              "Typed bridge retry item unavailable or uncertain; ledger "
-              "retained");
-        }
-        if (failure_notification)
-          co_await publish_failure(self->publisher_, token,
-                                   std::move(*failure_notification));
-      }
-      const auto revisions = co_await self->blocking_->run(
+      co_await asio::co_spawn(
+          strand,
+          run_retry_batch(
+              strand, std::move(ids),
+              [self, token](std::string &id, retry_queue::AttemptContext) {
+                return execute_delivery(self, token, id);
+              }),
+          asio::use_awaitable);
+      if (!token->valid())
+        co_return;
+      auto revisions = co_await self->blocking_->run(
           [repository = self->repository_, maximum = self->maximum_per_poll_] {
             return repository->list_ready_revision_retries(now_ms(), maximum);
           });
-      for (const auto &[delivery_id, revision_id] : revisions) {
-        if (!token->valid())
-          co_return;
-        std::optional<obcx::core::MessageEnvelope> failure_notification;
-        try {
-          const auto snapshot = co_await self->blocking_->run(
-              [repository = self->repository_, delivery_id] {
-                return repository->load_delivery(delivery_id);
-              });
-          if (!snapshot)
-            continue;
-          const auto route = self->select_route(*snapshot);
-          const auto revision =
-              std::ranges::find_if(snapshot->revisions, [&](const auto &entry) {
-                return entry.admission.revision_id == revision_id;
-              });
-          if (!route || revision == snapshot->revisions.end() ||
-              !token->valid())
-            continue;
-          auto result = co_await retry_bridge_revision(
-              self->gateway_, self->repository_, self->blocking_, *revision,
-              *route, token);
-          if (result.newly_completed) {
-            auto notification = bridge_revision_notification(result);
-            const auto published = co_await self->publisher_->publish(
-                token, std::move(notification));
-            if (!published)
-              warn_retained("Bridge edit retry completed without notification "
-                            "acceptance; no resubmit");
-          }
-        } catch (const BridgeRevisionPersistenceFailure &error) {
-          failure_notification =
-              bridge_revision_failure_notification(error.result());
-        } catch (const std::exception &error) {
-          if (is_bridge_operation_cancelled(error))
-            co_return;
-          warn_retained("Typed edit retry unavailable or uncertain; durable "
-                        "effects retained");
-        }
-        if (failure_notification)
-          co_await publish_failure(self->publisher_, token,
-                                   std::move(*failure_notification));
-      }
+      co_await asio::co_spawn(
+          strand,
+          run_retry_batch(strand, std::move(revisions),
+                          [self, token](std::pair<std::string, std::string> &id,
+                                        retry_queue::AttemptContext) {
+                            return execute_revision(self, token, id);
+                          }),
+          asio::use_awaitable);
     } catch (const std::exception &error) {
       if (is_bridge_operation_cancelled(error))
         co_return;

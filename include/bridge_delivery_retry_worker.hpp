@@ -42,6 +42,14 @@ private:
   static auto run(std::shared_ptr<BridgeDeliveryRetryWorker> self,
                   obcx::core::ActorGenerationLifecycle::TokenPtr token)
       -> boost::asio::awaitable<void>;
+  static auto execute_delivery(
+      std::shared_ptr<BridgeDeliveryRetryWorker> self,
+      obcx::core::ActorGenerationLifecycle::TokenPtr token, std::string id)
+      -> boost::asio::awaitable<void>;
+  static auto execute_revision(
+      std::shared_ptr<BridgeDeliveryRetryWorker> self,
+      obcx::core::ActorGenerationLifecycle::TokenPtr token,
+      std::pair<std::string, std::string> id) -> boost::asio::awaitable<void>;
   auto select_route(const ledger::DeliverySnapshot &snapshot) const
       -> std::optional<BridgeRetryRoute>;
   void finished(obcx::core::ActorGenerationLifecycle::TokenPtr token,

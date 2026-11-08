@@ -353,6 +353,15 @@ upsert.
 
 ### Message retry operations
 
+In-memory execution uses the independent `retry.queue` library
+(`retry_queue::retry_queue`). Each bounded discovery batch submits IDs as
+callable/payload jobs, serially, with exactly one in-memory attempt. The durable
+ledger still owns retry eligibility, attempt limits and backoff; an exception or
+failed notification never authorizes another send. Delivery batches drain before
+revision discovery, and all queue children drain inside the generation lease.
+The existing configured discovery interval remains a business recovery scan,
+not an idle polling loop inside the generic queue.
+
 Schema-5 typed-ledger retry discovery pages IDs and checks retry safety before
 loading bodies; it decodes full payloads only for the bounded selected work.
 See [retry-scan memory behavior and offline measurements](docs/retry-scan-memory.md).

@@ -14,7 +14,7 @@
 
 namespace bridge {
 namespace {
-namespace pm = obcx::path_mapping;
+namespace pm = path_mapping;
 namespace fs = std::filesystem;
 
 template <typename T> auto require(std::expected<T, pm::Error> result) -> T {

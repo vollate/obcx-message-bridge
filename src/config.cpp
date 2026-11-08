@@ -553,7 +553,7 @@ void validate_bridge_config(const BridgeConfig &config) {
           "bridge OneBot installation belongs to more than one pair: " +
           pair.onebot11_installation);
     }
-    if (!obcx::path_mapping::Mapper::create(
+    if (!path_mapping::Mapper::create(
             {{pair.onebot11_installation, config.bridge_files_dir,
               config.bridge_files_container_dir}})) {
       throw std::runtime_error("bridge requires valid absolute media roots");

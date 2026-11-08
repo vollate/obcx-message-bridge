@@ -95,7 +95,7 @@ private:
   static auto read_descriptor_bounded(int file, std::size_t maximum_bytes)
       -> std::vector<std::uint8_t>;
   std::string installation_;
-  obcx::path_mapping::Mapper mapper_;
+  path_mapping::Mapper mapper_;
   std::string host_base_;
   std::string container_base_;
 };
