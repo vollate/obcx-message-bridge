@@ -48,7 +48,8 @@ auto prepare_read_photos(
 // Only original observed media references enter here. No archive, native URL,
 // provider path, send or retry is accepted. The configured placeholder is a
 // separate actor-owned public source; it never substitutes read authority.
-// GIF bytes remain Animation: never run a single-frame photo normalizer.
+// Multi-frame GIF bytes remain Animation and are never flattened. Single-frame
+// GIFs become static photos; structurally invalid GIFs are unsupported.
 auto prepare_photos(std::shared_ptr<obcx::bot::BotOperationGateway> gateway,
                     std::shared_ptr<obcx::core::BlockingExecutor> blocking,
                     std::shared_ptr<const BridgeConfig> config,

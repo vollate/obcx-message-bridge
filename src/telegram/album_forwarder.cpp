@@ -63,9 +63,9 @@ auto OrdinaryForwarder::forward_album(
   // Unmatched batches remain no-ops, just like ordinary messages. Validate
   // presentation only after every member has a matching, consistent route.
   for (const auto &item : stored)
-    if (!accepts_body(item.message, false))
+    if (const auto reason = body_rejection_reason(item.message, false))
       throw std::invalid_argument(
-          "Telegram album contains unsupported content");
+          "Telegram album contains unsupported content: " + *reason);
   const auto route = sources.front().route;
   const auto source = group->conversation;
   std::vector<domain::MessageRef> refs;
@@ -187,7 +187,8 @@ auto OrdinaryForwarder::forward_album(
     origins.emplace_back(std::move(contribution));
   }
   if (body.empty())
-    throw std::invalid_argument("album prepared no outbound content");
+    throw std::invalid_argument(
+        "album prepared no outbound content: no forwardable content");
   const auto &primary = stored[eligible.front()];
   BridgeDeliveryRequest request{
       delivery_id,

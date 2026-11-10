@@ -58,9 +58,10 @@ auto OrdinaryForwarder::prepare_edit(
   auto resolved = resolve_source(stored);
   if (!resolved)
     co_return EditPreparation{std::monostate{}};
-  if (!accepts_body(stored.message, true))
+  if (const auto reason = body_rejection_reason(stored.message, true))
     throw std::invalid_argument("edit contains unsupported content or a "
-                                "non-unique control observation");
+                                "non-unique control observation: " +
+                                *reason);
   if (publication.event_id.empty() ||
       publication.source_bot != stored.source.source_bot)
     throw std::invalid_argument("edit lacks original publication identity");
@@ -232,7 +233,8 @@ auto OrdinaryForwarder::prepare_edit(
       stored, std::move(*resolved), member->member_id, true, false, true,
       limits, AttachmentFailurePolicy::FailClosed);
   if (prepared.body.empty())
-    throw std::runtime_error("edited source prepared no outbound content");
+    throw std::runtime_error(
+        "edited source prepared no outbound content: no forwardable content");
   BridgeDeliveryRequest request{
       original->delivery_id,
       revision_id + ":send:1",

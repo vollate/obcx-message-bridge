@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fmt/format.h>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <poll.h>
 #include <span>
@@ -383,6 +384,61 @@ auto inspect_photo_dimensions(std::string_view encoded) -> PhotoInspection {
           .dimensions = *dimensions};
 }
 
+auto inspect_gif_frames(std::string_view encoded) -> GifFrameCount {
+  const auto data = bytes(encoded);
+  if (!gif_dimensions(data) || data.size() < 13) {
+    return GifFrameCount::Malformed;
+  }
+  std::size_t cursor = 13;
+  const auto skip_color_table = [&](std::uint8_t flags) {
+    if ((flags & 0x80U) != 0) {
+      cursor += std::size_t{3} << ((flags & 0x07U) + 1U);
+    }
+  };
+  const auto skip_sub_blocks = [&] {
+    while (cursor < data.size() && data[cursor] != 0) {
+      cursor += std::size_t{1} + data[cursor];
+    }
+    if (cursor >= data.size()) {
+      return false;
+    }
+    ++cursor;
+    return true;
+  };
+  skip_color_table(data[10]);
+  std::size_t frames = 0;
+  while (cursor < data.size()) {
+    const auto introducer = data[cursor];
+    if (introducer == 0x3b) {
+      break;
+    }
+    if (introducer == 0x21) {
+      cursor += 2;
+      if (!skip_sub_blocks()) {
+        return GifFrameCount::Malformed;
+      }
+    } else if (introducer == 0x2c) {
+      if (frames == 1) {
+        return GifFrameCount::Multiple;
+      }
+      if (data.size() - cursor < 11) {
+        return GifFrameCount::Malformed;
+      }
+      const auto flags = data[cursor + 9];
+      cursor += 10;
+      skip_color_table(flags);
+      ++cursor;
+      if (!skip_sub_blocks()) {
+        return GifFrameCount::Malformed;
+      }
+      ++frames;
+    } else {
+      return GifFrameCount::Malformed;
+    }
+  }
+  return frames == 1 ? GifFrameCount::Single : GifFrameCount::Malformed;
+}
+
 auto telegram_photo_target_geometry(PhotoDimensions dimensions)
     -> std::optional<PhotoTargetGeometry> {
   if (dimensions.width == 0 || dimensions.height == 0) {
@@ -484,88 +540,18 @@ auto PhotoNormalizer::normalize(DownloadedImage image) const
                                 inspection.dimensions);
   }
 
-  TemporaryPhotoDirectory temporary;
-  if (!temporary.valid()) {
-    return failed_normalization(PhotoNormalizationFailure::NormalizationFailed,
-                                inspection.dimensions);
-  }
-  const auto input =
-      temporary.root() /
-      (std::string{"input"} + std::string{input_extension(image.mime_type)});
-  const auto output = temporary.root() / "output.jpg";
-  {
-    std::ofstream stream(input, std::ios::binary | std::ios::trunc);
-    stream.write(image.data.data(),
-                 static_cast<std::streamsize>(image.data.size()));
-    if (!stream) {
-      return failed_normalization(
-          PhotoNormalizationFailure::NormalizationFailed,
-          inspection.dimensions);
-    }
-  }
-
   const auto filter = fmt::format(
       "scale={}:{}:flags=lanczos,pad={}:{}:(ow-iw)/2:(oh-ih)/2:color=white",
       geometry->image.width, geometry->image.height, geometry->canvas.width,
       geometry->canvas.height);
-  const std::vector<std::string> arguments = {
-      ffmpeg_path_,
-      "-nostdin",
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-threads",
-      "1",
-      "-filter_threads",
-      "1",
-      "-i",
-      input.string(),
-      "-frames:v",
-      "1",
-      "-vf",
-      filter,
-      "-q:v",
-      "4",
-      "-threads",
-      "1",
-      "-y",
-      output.string(),
-  };
-
-  ProcessResult process;
-  try {
-    process = process_runner_(
-        arguments, std::chrono::duration_cast<std::chrono::milliseconds>(
-                       kTelegramPhotoNormalizationTimeout));
-  } catch (...) {
+  auto normalized = transcode(
+      image, {"-frames:v", "1", "-vf", filter, "-q:v", "4"}, "output.jpg");
+  if (!normalized || MediaProcessor::detect_mime_type_from_content(
+                         *normalized) != "image/jpeg") {
     return failed_normalization(PhotoNormalizationFailure::NormalizationFailed,
                                 inspection.dimensions);
   }
-  if (process.timed_out || process.exit_code != 0) {
-    return failed_normalization(PhotoNormalizationFailure::NormalizationFailed,
-                                inspection.dimensions);
-  }
-
-  std::error_code error;
-  const auto output_size = fs::file_size(output, error);
-  if (error || output_size == 0 || output_size > output_byte_limit_) {
-    return failed_normalization(PhotoNormalizationFailure::NormalizationFailed,
-                                inspection.dimensions);
-  }
-  std::ifstream stream(output, std::ios::binary);
-  std::string normalized{std::istreambuf_iterator<char>{stream},
-                         std::istreambuf_iterator<char>{}};
-  if (!stream && !stream.eof()) {
-    return failed_normalization(PhotoNormalizationFailure::NormalizationFailed,
-                                inspection.dimensions);
-  }
-  if (normalized.size() != output_size ||
-      MediaProcessor::detect_mime_type_from_content(normalized) !=
-          "image/jpeg") {
-    return failed_normalization(PhotoNormalizationFailure::NormalizationFailed,
-                                inspection.dimensions);
-  }
-  const auto output_inspection = inspect_photo_dimensions(normalized);
+  const auto output_inspection = inspect_photo_dimensions(*normalized);
   if (output_inspection.status != PhotoDimensionStatus::Compliant) {
     return failed_normalization(PhotoNormalizationFailure::NormalizationFailed,
                                 inspection.dimensions);
@@ -573,11 +559,99 @@ auto PhotoNormalizer::normalize(DownloadedImage image) const
 
   image.filename = "qq-media-normalized.jpg";
   image.mime_type = "image/jpeg";
-  image.data = std::move(normalized);
+  image.data = std::move(*normalized);
   return {.image = std::move(image),
           .normalized = true,
           .source_dimensions = inspection.dimensions,
           .output_dimensions = output_inspection.dimensions};
+}
+
+auto PhotoNormalizer::flatten_gif(DownloadedImage image) const
+    -> PhotoNormalizationResult {
+  const auto inspection = inspect_photo_dimensions(image.data);
+  if (inspection.status == PhotoDimensionStatus::InvalidDimensions) {
+    return failed_normalization(PhotoNormalizationFailure::InvalidDimensions);
+  }
+  if (inspection.status == PhotoDimensionStatus::UnsafeDimensions) {
+    return failed_normalization(PhotoNormalizationFailure::UnsafeDimensions,
+                                inspection.dimensions);
+  }
+  if (ffmpeg_path_.empty() || output_byte_limit_ == 0) {
+    return failed_normalization(PhotoNormalizationFailure::NormalizationFailed,
+                                inspection.dimensions);
+  }
+  image.mime_type = "image/gif";
+  const auto filter =
+      fmt::format("color=c=white:s={}x{}[background];[0:v]format=rgba[frame];"
+                  "[background][frame]overlay=shortest=1:format=auto,"
+                  "format=rgb24",
+                  inspection.dimensions.width, inspection.dimensions.height);
+  auto flattened = transcode(
+      image, {"-frames:v", "1", "-filter_complex", filter}, "output.png");
+  if (!flattened || MediaProcessor::detect_mime_type_from_content(*flattened) !=
+                        "image/png") {
+    return failed_normalization(PhotoNormalizationFailure::NormalizationFailed,
+                                inspection.dimensions);
+  }
+  image.filename = "qq-media.png";
+  image.mime_type = "image/png";
+  image.data = std::move(*flattened);
+  return normalize(std::move(image));
+}
+
+auto PhotoNormalizer::transcode(const DownloadedImage &image,
+                                std::vector<std::string> output_options,
+                                std::string_view output_name) const
+    -> std::optional<std::string> {
+  TemporaryPhotoDirectory temporary;
+  if (!temporary.valid()) {
+    return std::nullopt;
+  }
+  const auto input =
+      temporary.root() /
+      (std::string{"input"} + std::string{input_extension(image.mime_type)});
+  const auto output = temporary.root() / output_name;
+  {
+    std::ofstream stream(input, std::ios::binary | std::ios::trunc);
+    stream.write(image.data.data(),
+                 static_cast<std::streamsize>(image.data.size()));
+    if (!stream) {
+      return std::nullopt;
+    }
+  }
+
+  std::vector<std::string> arguments = {
+      ffmpeg_path_,   "-nostdin", "-hide_banner",    "-loglevel", "error",
+      "-threads",     "1",        "-filter_threads", "1",         "-i",
+      input.string(),
+  };
+  std::ranges::move(output_options, std::back_inserter(arguments));
+  arguments.insert(arguments.end(), {"-threads", "1", "-y", output.string()});
+
+  ProcessResult process;
+  try {
+    process = process_runner_(
+        arguments, std::chrono::duration_cast<std::chrono::milliseconds>(
+                       kTelegramPhotoNormalizationTimeout));
+  } catch (...) {
+    return std::nullopt;
+  }
+  if (process.timed_out || process.exit_code != 0) {
+    return std::nullopt;
+  }
+
+  std::error_code error;
+  const auto output_size = fs::file_size(output, error);
+  if (error || output_size == 0 || output_size > output_byte_limit_) {
+    return std::nullopt;
+  }
+  std::ifstream stream(output, std::ios::binary);
+  std::string encoded{std::istreambuf_iterator<char>{stream},
+                      std::istreambuf_iterator<char>{}};
+  if ((!stream && !stream.eof()) || encoded.size() != output_size) {
+    return std::nullopt;
+  }
+  return encoded;
 }
 
 auto PhotoNormalizer::normalize_batch(std::vector<DownloadedImage> images) const

@@ -25,6 +25,42 @@ auto encode(std::string codec, const T &value) -> ledger::OpaqueValue {
   auto bytes = domain::Json::to_cbor(domain::Json(value));
   return {std::move(codec), 1, {bytes.begin(), bytes.end()}};
 }
+auto diagnostic_identifier(std::string_view value, bool category) -> bool {
+  const auto initial = [](unsigned char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+  };
+  return !value.empty() && value.size() <= 128 && initial(value.front()) &&
+         std::ranges::all_of(value, [&](unsigned char c) {
+           return initial(c) || (c >= '0' && c <= '9') ||
+                  (category && (c == '.' || c == '-'));
+         });
+}
+auto unsupported_marker_reason(const domain::UnsupportedContent &marker)
+    -> std::string {
+  std::string reason = "unsupported ";
+  reason += diagnostic_identifier(marker.category, true) ? marker.category
+                                                         : "invalid-category";
+  if (marker.description && diagnostic_identifier(*marker.description, false))
+    reason += " (" + *marker.description + ")";
+  return reason;
+}
+auto media_kind_identifier(domain::MediaKind kind) -> const char * {
+  switch (kind) {
+  case domain::MediaKind::Image:
+    return "image";
+  case domain::MediaKind::Animation:
+    return "animation";
+  case domain::MediaKind::Video:
+    return "video";
+  case domain::MediaKind::Audio:
+    return "audio";
+  case domain::MediaKind::Voice:
+    return "voice";
+  case domain::MediaKind::File:
+    return "file";
+  }
+  return "unknown";
+}
 auto is_qq_echo(const domain::MessageReceived &message) -> bool {
   constexpr std::string_view marker = "[QQ] ";
   std::size_t matched = 0;
@@ -136,10 +172,9 @@ auto OrdinaryForwarder::literal_entity_marker(
          kind == "hashtag" || kind == "cashtag";
 }
 
-auto OrdinaryForwarder::accepts_body(const domain::MessageReceived &message,
-                                     bool allow_edit_marker) -> bool {
-  if (message.body.empty())
-    return false;
+auto OrdinaryForwarder::body_rejection_reason(
+    const domain::MessageReceived &message, bool allow_edit_marker)
+    -> std::optional<std::string> {
   const auto has_literal = [](const domain::ReceivedRichText &text) {
     return std::ranges::any_of(text, [](const auto &span) {
       const auto *literal = std::get_if<domain::Text>(&span);
@@ -171,9 +206,18 @@ auto OrdinaryForwarder::accepts_body(const domain::MessageReceived &message,
     if (allow_edit_marker && marker && !marker->description &&
         marker->category == "telegram.edited" && ++edit_markers == 1)
       continue;
-    return false;
+    return marker ? unsupported_marker_reason(*marker) : "unsupported content";
   }
-  return content_present && (!allow_edit_marker || edit_markers == 1);
+  if (!content_present)
+    return "no forwardable content";
+  if (allow_edit_marker && edit_markers != 1)
+    return "missing telegram.edited control observation";
+  return std::nullopt;
+}
+
+auto OrdinaryForwarder::accepts_body(const domain::MessageReceived &message,
+                                     bool allow_edit_marker) -> bool {
+  return !body_rejection_reason(message, allow_edit_marker).has_value();
 }
 
 auto OrdinaryForwarder::accepts(const domain::MessageReceived &message)
@@ -280,9 +324,19 @@ auto OrdinaryForwarder::forward(
   auto resolved = resolve_source(stored);
   if (!resolved)
     co_return BridgeForwardResult{};
-  if (!accepts(stored.message))
+  if (!stored.message.body.empty() && !stored.message.media_group &&
+      !obcx::telegram::bot::message_update_view(stored.message) &&
+      std::ranges::all_of(stored.message.body, [](const auto &block) {
+        const auto *marker = std::get_if<domain::UnsupportedContent>(&block);
+        return marker && marker->category == "telegram.service";
+      }))
+    co_return BridgeForwardResult{};
+  if (stored.message.media_group)
+    throw std::invalid_argument("Telegram forwarding requires ordinary typed "
+                                "content: requires album path");
+  if (const auto reason = body_rejection_reason(stored.message, false))
     throw std::invalid_argument(
-        "Telegram forwarding requires ordinary typed content");
+        "Telegram forwarding requires ordinary typed content: " + *reason);
   const auto &route = resolved->route;
   const auto source = stored.message.message.conversation;
   const auto digest = calculate_hash(
@@ -397,7 +451,9 @@ void OrdinaryForwarder::check_media_capabilities(
           (!sticker && media->kind == domain::MediaKind::Animation &&
            !supports(domain::MediaKind::Video)))
         throw std::runtime_error(
-            "target has no installed owned-byte recipe for source media kind");
+            std::string{"target has no installed owned-byte recipe for source "
+                        "media kind: "} +
+            media_kind_identifier(media->kind));
     }
   }
 }
@@ -414,8 +470,10 @@ auto OrdinaryForwarder::prepare_member(
     throw std::invalid_argument(
         "attachment omission requires album membership and retained captions");
   domain::OperationCorrelation{member_id}.validate();
-  if (!accepts_body(stored.message, allow_edit_marker))
-    throw std::invalid_argument("unsupported Telegram preparation content");
+  if (const auto reason =
+          body_rejection_reason(stored.message, allow_edit_marker))
+    throw std::invalid_argument("unsupported Telegram preparation content: " +
+                                *reason);
   const auto &route = resolved.route;
   const auto source = stored.message.message.conversation;
   std::optional<domain::MessageRef> reply;
@@ -472,7 +530,8 @@ auto OrdinaryForwarder::prepare_member(
         inputs.push_back("body:" + std::to_string(index));
         continue;
       }
-      throw std::invalid_argument("unsupported Telegram preparation content");
+      throw std::invalid_argument("unsupported Telegram preparation content: " +
+                                  unsupported_marker_reason(*marker));
     }
     auto key = "body:" + std::to_string(index);
     inputs.push_back(key);
@@ -608,7 +667,9 @@ auto OrdinaryForwarder::prepare_member(
       }
       default:
         throw std::invalid_argument(
-            "specialized Telegram media requires its dedicated path");
+            std::string{
+                "specialized Telegram media requires its dedicated path: "} +
+            media_kind_identifier(media.kind));
       }
     }
     origins.emplace_back(std::move(contribution));

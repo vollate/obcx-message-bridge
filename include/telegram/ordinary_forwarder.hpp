@@ -85,6 +85,9 @@ private:
       const obcx::bot::MessageReceived &message, std::size_t index) -> bool;
   [[nodiscard]] static auto literal_entity_marker(
       const obcx::bot::UnsupportedContent &marker) -> bool;
+  [[nodiscard]] static auto body_rejection_reason(
+      const obcx::bot::MessageReceived &message, bool allow_edit_marker)
+      -> std::optional<std::string>;
   [[nodiscard]] static auto accepts_body(
       const obcx::bot::MessageReceived &message, bool allow_edit_marker)
       -> bool;

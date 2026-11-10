@@ -197,17 +197,27 @@ auto prepare_read_photos(std::shared_ptr<domain::BotOperationGateway> gateway,
       const auto mime = static_photo_mime(image.data);
       const bool image_kind =
           !blob.kind || *blob.kind == domain::MediaKind::Image;
+      std::optional<PhotoNormalizationResult> normalized;
       if ((image_kind || blob.kind == domain::MediaKind::Animation) &&
           MediaProcessor::detect_mime_type_from_content(image.data) ==
               "image/gif") {
         const auto dimensions = inspect_photo_dimensions(image.data);
+        const auto frames = inspect_gif_frames(image.data);
         if (dimensions.status == PhotoDimensionStatus::InvalidDimensions)
           status = PhotoPreparationStatus::InvalidDimensions;
         else if (dimensions.status == PhotoDimensionStatus::UnsafeDimensions)
           status = PhotoPreparationStatus::UnsafeDimensions;
+        else if (frames == GifFrameCount::Malformed)
+          status = PhotoPreparationStatus::UnsupportedFormat;
+        else if (frames == GifFrameCount::Single)
+          normalized = co_await blocking->run(
+              [config, maximum, image = std::move(image)]() mutable {
+                return PhotoNormalizer(config->ffmpeg_path, maximum)
+                    .flatten_gif(std::move(image));
+              });
         else {
-          // Static-photo aspect/size normalization must not flatten a GIF.
-          // Preserve its bytes and let the animation recipe validate format.
+          // Static-photo aspect/size normalization must not flatten an
+          // animated GIF. Preserve its bytes for the animation recipe.
           blob.source.metadata.mime_type = "image/gif";
           blob.source.metadata.filename = "qq-media.gif";
           blob.source.metadata.size_bytes = blob.source.bytes.size();
@@ -223,17 +233,19 @@ auto prepare_read_photos(std::shared_ptr<domain::BotOperationGateway> gateway,
       } else {
         image.mime_type = *mime;
         image.filename = *mime == "image/png" ? "qq-media.png" : "qq-media.jpg";
-        auto normalized = co_await blocking->run(
+        normalized = co_await blocking->run(
             [config, maximum, image = std::move(image)]() mutable {
               return PhotoNormalizer(config->ffmpeg_path, maximum)
                   .normalize(std::move(image));
             });
-        if (normalized.succeeded()) {
-          source = owned_photo(std::move(*normalized.image), maximum);
-          status = normalized.normalized ? PhotoPreparationStatus::Adjusted
-                                         : PhotoPreparationStatus::Ready;
+      }
+      if (normalized) {
+        if (normalized->succeeded()) {
+          source = owned_photo(std::move(*normalized->image), maximum);
+          status = normalized->normalized ? PhotoPreparationStatus::Adjusted
+                                          : PhotoPreparationStatus::Ready;
         } else {
-          status = normalization_status(normalized.failure);
+          status = normalization_status(normalized->failure);
         }
       }
     }

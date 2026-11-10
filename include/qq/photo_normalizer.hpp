@@ -47,6 +47,13 @@ struct PhotoInspection {
 
 [[nodiscard]] auto inspect_photo_dimensions(std::string_view encoded)
     -> PhotoInspection;
+
+enum class GifFrameCount : std::uint8_t { Single, Multiple, Malformed };
+
+// Walks the GIF block structure without decoding pixel data. A missing trailer
+// after one complete frame still counts as a single frame.
+[[nodiscard]] auto inspect_gif_frames(std::string_view encoded)
+    -> GifFrameCount;
 [[nodiscard]] auto telegram_photo_dimensions_compliant(
     PhotoDimensions dimensions) -> bool;
 [[nodiscard]] auto telegram_photo_target_geometry(PhotoDimensions dimensions)
@@ -89,11 +96,19 @@ public:
   auto normalize(DownloadedImage image) const -> PhotoNormalizationResult;
   auto normalize_batch(std::vector<DownloadedImage> images) const
       -> std::vector<PhotoNormalizationResult>;
+  // Telegram downgrades sendAnimation of a single-frame GIF to a document, so
+  // such GIFs become a static PNG on white before dimension normalization.
+  auto flatten_gif(DownloadedImage image) const -> PhotoNormalizationResult;
 
   static auto run_process(const std::vector<std::string> &arguments,
                           std::chrono::milliseconds timeout) -> ProcessResult;
 
 private:
+  auto transcode(const DownloadedImage &image,
+                 std::vector<std::string> output_options,
+                 std::string_view output_name) const
+      -> std::optional<std::string>;
+
   std::string ffmpeg_path_;
   std::size_t output_byte_limit_;
   ProcessRunner process_runner_;
