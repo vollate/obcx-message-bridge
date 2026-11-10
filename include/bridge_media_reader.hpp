@@ -1,7 +1,7 @@
 #pragma once
 
 #include <core/bot/bot_client.hpp>
-#include <core/bot/domain_events.hpp>
+#include <core/bot/bot_events.hpp>
 #include <memory>
 
 namespace bridge {

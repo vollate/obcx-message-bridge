@@ -5,7 +5,7 @@
 #include "bridge_state_repository.hpp"
 #include "telegram/media_processor.hpp"
 #include <common/logger.hpp>
-#include <telegram/bot/domain_views.hpp>
+#include <telegram/bot/bot_views.hpp>
 
 #include <algorithm>
 #include <stdexcept>
@@ -13,8 +13,8 @@
 
 namespace bridge::telegram {
 namespace {
-namespace domain = obcx::bot;
-template <class T> auto require(domain::BotOperationResult<T> result) -> T {
+namespace bot = obcx::bot;
+template <class T> auto require(bot::BotOperationResult<T> result) -> T {
   result.validate();
   if (!result.ok())
     throw BridgeBotOperationFailure(std::move(*result.error));
@@ -22,7 +22,7 @@ template <class T> auto require(domain::BotOperationResult<T> result) -> T {
 }
 template <class T>
 auto encode(std::string codec, const T &value) -> ledger::OpaqueValue {
-  auto bytes = domain::Json::to_cbor(domain::Json(value));
+  auto bytes = bot::Json::to_cbor(bot::Json(value));
   return {std::move(codec), 1, {bytes.begin(), bytes.end()}};
 }
 auto diagnostic_identifier(std::string_view value, bool category) -> bool {
@@ -35,7 +35,7 @@ auto diagnostic_identifier(std::string_view value, bool category) -> bool {
                   (category && (c == '.' || c == '-'));
          });
 }
-auto unsupported_marker_reason(const domain::UnsupportedContent &marker)
+auto unsupported_marker_reason(const bot::UnsupportedContent &marker)
     -> std::string {
   std::string reason = "unsupported ";
   reason += diagnostic_identifier(marker.category, true) ? marker.category
@@ -44,32 +44,32 @@ auto unsupported_marker_reason(const domain::UnsupportedContent &marker)
     reason += " (" + *marker.description + ")";
   return reason;
 }
-auto media_kind_identifier(domain::MediaKind kind) -> const char * {
+auto media_kind_identifier(bot::MediaKind kind) -> const char * {
   switch (kind) {
-  case domain::MediaKind::Image:
+  case bot::MediaKind::Image:
     return "image";
-  case domain::MediaKind::Animation:
+  case bot::MediaKind::Animation:
     return "animation";
-  case domain::MediaKind::Video:
+  case bot::MediaKind::Video:
     return "video";
-  case domain::MediaKind::Audio:
+  case bot::MediaKind::Audio:
     return "audio";
-  case domain::MediaKind::Voice:
+  case bot::MediaKind::Voice:
     return "voice";
-  case domain::MediaKind::File:
+  case bot::MediaKind::File:
     return "file";
   }
   return "unknown";
 }
-auto is_qq_echo(const domain::MessageReceived &message) -> bool {
+auto is_qq_echo(const bot::MessageReceived &message) -> bool {
   constexpr std::string_view marker = "[QQ] ";
   std::size_t matched = 0;
   for (const auto &block : message.body) {
-    const auto *text = std::get_if<domain::ReceivedRichText>(&block);
+    const auto *text = std::get_if<bot::ReceivedRichText>(&block);
     if (!text)
       return false;
     for (const auto &span : *text) {
-      const auto *literal = std::get_if<domain::Text>(&span);
+      const auto *literal = std::get_if<bot::Text>(&span);
       if (!literal)
         return false;
       const auto count =
@@ -87,8 +87,8 @@ auto is_qq_echo(const domain::MessageReceived &message) -> bool {
 } // namespace
 
 OrdinaryForwarder::OrdinaryForwarder(
-    std::shared_ptr<domain::BotOperationGateway> gateway,
-    std::shared_ptr<const domain::ConversationResolver> references,
+    std::shared_ptr<bot::BotOperationGateway> gateway,
+    std::shared_ptr<const bot::ConversationResolver> references,
     std::shared_ptr<BridgeStateRepository> repository,
     std::shared_ptr<obcx::core::BlockingExecutor> blocking,
     const BridgeInstallationPair &pair,
@@ -97,7 +97,7 @@ OrdinaryForwarder::OrdinaryForwarder(
       repository_(std::move(repository)), blocking_(std::move(blocking)),
       config_(std::move(config)),
       installation_{pair.telegram_installation,
-                    domain::SurfaceId{"telegram.bot_api"}},
+                    bot::SurfaceId{"telegram.bot_api"}},
       pair_id_(pair.id) {
   if (!gateway_ || !references_ || !repository_ || !blocking_ || !config_)
     throw std::invalid_argument(
@@ -105,8 +105,8 @@ OrdinaryForwarder::OrdinaryForwarder(
   media_processor_ = std::make_shared<TelegramMediaProcessor>(
       std::make_shared<BridgeCommandOperations>(gateway_, pair, references_),
       config_, repository_, blocking_);
-  const domain::BotInstallationRef target_installation{
-      pair.onebot11_installation, domain::SurfaceId{"onebot11.qq"}};
+  const bot::BotInstallationRef target_installation{
+      pair.onebot11_installation, bot::SurfaceId{"onebot11.qq"}};
   const auto add = [&](const std::string &group,
                        std::optional<std::string> topic, bool all_topics,
                        const std::string &qq, bool show_sender) {
@@ -140,13 +140,12 @@ OrdinaryForwarder::OrdinaryForwarder(
 }
 
 auto OrdinaryForwarder::handled_media_marker(
-    const domain::MessageReceived &message, std::size_t index) -> bool {
+    const bot::MessageReceived &message, std::size_t index) -> bool {
   if (index == 0 || index >= message.body.size())
     return false;
   const auto *marker =
-      std::get_if<domain::UnsupportedContent>(&message.body[index]);
-  const auto *media =
-      std::get_if<domain::ReceivedMedia>(&message.body[index - 1]);
+      std::get_if<bot::UnsupportedContent>(&message.body[index]);
+  const auto *media = std::get_if<bot::ReceivedMedia>(&message.body[index - 1]);
   if (!marker || marker->description || !media ||
       media->media.installation != message.message.conversation.installation)
     return false;
@@ -160,7 +159,7 @@ auto OrdinaryForwarder::handled_media_marker(
 }
 
 auto OrdinaryForwarder::literal_entity_marker(
-    const domain::UnsupportedContent &marker) -> bool {
+    const bot::UnsupportedContent &marker) -> bool {
   if (marker.category != "telegram.entity" || !marker.description)
     return false;
   // These classify literal text already present in the typed body/caption.
@@ -173,19 +172,19 @@ auto OrdinaryForwarder::literal_entity_marker(
 }
 
 auto OrdinaryForwarder::body_rejection_reason(
-    const domain::MessageReceived &message, bool allow_edit_marker)
+    const bot::MessageReceived &message, bool allow_edit_marker)
     -> std::optional<std::string> {
-  const auto has_literal = [](const domain::ReceivedRichText &text) {
+  const auto has_literal = [](const bot::ReceivedRichText &text) {
     return std::ranges::any_of(text, [](const auto &span) {
-      const auto *literal = std::get_if<domain::Text>(&span);
+      const auto *literal = std::get_if<bot::Text>(&span);
       return literal && !literal->content.empty();
     });
   };
   const auto literal_present =
       std::ranges::any_of(message.body, [&](const auto &block) {
-        if (const auto *text = std::get_if<domain::ReceivedRichText>(&block))
+        if (const auto *text = std::get_if<bot::ReceivedRichText>(&block))
           return has_literal(*text);
-        if (const auto *media = std::get_if<domain::ReceivedMedia>(&block))
+        if (const auto *media = std::get_if<bot::ReceivedMedia>(&block))
           return has_literal(media->caption);
         return false;
       });
@@ -193,14 +192,14 @@ auto OrdinaryForwarder::body_rejection_reason(
   std::size_t edit_markers = 0;
   for (std::size_t index = 0; index < message.body.size(); ++index) {
     const auto &block = message.body[index];
-    if (std::holds_alternative<domain::ReceivedRichText>(block) ||
-        std::holds_alternative<domain::ReceivedMedia>(block)) {
+    if (std::holds_alternative<bot::ReceivedRichText>(block) ||
+        std::holds_alternative<bot::ReceivedMedia>(block)) {
       content_present = true;
       continue;
     }
     if (handled_media_marker(message, index))
       continue;
-    const auto *marker = std::get_if<domain::UnsupportedContent>(&block);
+    const auto *marker = std::get_if<bot::UnsupportedContent>(&block);
     if (marker && literal_present && literal_entity_marker(*marker))
       continue;
     if (allow_edit_marker && marker && !marker->description &&
@@ -215,26 +214,24 @@ auto OrdinaryForwarder::body_rejection_reason(
   return std::nullopt;
 }
 
-auto OrdinaryForwarder::accepts_body(const domain::MessageReceived &message,
+auto OrdinaryForwarder::accepts_body(const bot::MessageReceived &message,
                                      bool allow_edit_marker) -> bool {
   return !body_rejection_reason(message, allow_edit_marker).has_value();
 }
 
-auto OrdinaryForwarder::accepts(const domain::MessageReceived &message)
-    -> bool {
+auto OrdinaryForwarder::accepts(const bot::MessageReceived &message) -> bool {
   // Edits and albums retain their own admission path; recognizing supported
   // special-media observations does not convert either into a new send.
   return !message.media_group && accepts_body(message, false);
 }
 
-auto OrdinaryForwarder::display_name(domain::UserRef user,
-                                     domain::ConversationRef source)
+auto OrdinaryForwarder::display_name(bot::UserRef user,
+                                     bot::ConversationRef source)
     -> boost::asio::awaitable<std::optional<std::string>> {
-  auto result =
-      co_await domain::BotClient{*gateway_}.get_member({source, user});
+  auto result = co_await bot::BotClient{*gateway_}.get_member({source, user});
   result.validate();
   if (!result.ok()) {
-    if (result.error->code == domain::BotOperationErrorCode::Cancelled)
+    if (result.error->code == bot::BotOperationErrorCode::Cancelled)
       throw BridgeBotOperationFailure(std::move(*result.error));
     co_return std::nullopt;
   }
@@ -243,27 +240,27 @@ auto OrdinaryForwarder::display_name(domain::UserRef user,
   co_return result.value->display_name;
 }
 
-auto OrdinaryForwarder::render_text(domain::ReceivedRichText text,
-                                    domain::ConversationRef source)
-    -> boost::asio::awaitable<domain::RichText> {
-  domain::RichText rendered;
+auto OrdinaryForwarder::render_text(bot::ReceivedRichText text,
+                                    bot::ConversationRef source)
+    -> boost::asio::awaitable<bot::RichText> {
+  bot::RichText rendered;
   for (const auto &span : text) {
-    if (const auto *literal = std::get_if<domain::Text>(&span)) {
+    if (const auto *literal = std::get_if<bot::Text>(&span)) {
       // Preserve the predecessor's explicit plain-text QQ presentation. Do not
       // ask the SDK to silently drop unsupported native text styles.
       if (!literal->content.empty())
-        rendered.emplace_back(domain::Text{literal->content, {}});
-    } else if (const auto *mention = std::get_if<domain::Mention>(&span)) {
+        rendered.emplace_back(bot::Text{literal->content, {}});
+    } else if (const auto *mention = std::get_if<bot::Mention>(&span)) {
       auto name = co_await display_name(mention->user, source);
       const auto id = std::to_string(
           obcx::telegram::bot::user_identity_view(mention->user).user_id);
       rendered.emplace_back(
-          domain::Text{name ? "@" + *name : "[@" + id + "]", {}});
+          bot::Text{name ? "@" + *name : "[@" + id + "]", {}});
     } else if (const auto *username =
-                   std::get_if<domain::UnresolvedMention>(&span)) {
-      rendered.emplace_back(domain::Text{"@" + username->username, {}});
+                   std::get_if<bot::UnresolvedMention>(&span)) {
+      rendered.emplace_back(bot::Text{"@" + username->username, {}});
     } else {
-      rendered.emplace_back(domain::Text{"[@all]", {}});
+      rendered.emplace_back(bot::Text{"[@all]", {}});
     }
   }
   co_return rendered;
@@ -312,7 +309,7 @@ auto OrdinaryForwarder::resolve_source(
   }
   const bool genuine_reply = stored.message.reply &&
                              stored.message.reply->relation() ==
-                                 domain::ReplyRelation::SameConversation &&
+                                 bot::ReplyRelation::SameConversation &&
                              !facts.topic_root_reply;
   return ResolvedSource{route, std::move(observed_sender_name), genuine_reply};
 }
@@ -327,7 +324,7 @@ auto OrdinaryForwarder::forward(
   if (!stored.message.body.empty() && !stored.message.media_group &&
       !obcx::telegram::bot::message_update_view(stored.message) &&
       std::ranges::all_of(stored.message.body, [](const auto &block) {
-        const auto *marker = std::get_if<domain::UnsupportedContent>(&block);
+        const auto *marker = std::get_if<bot::UnsupportedContent>(&block);
         return marker && marker->category == "telegram.service";
       }))
     co_return BridgeForwardResult{};
@@ -340,10 +337,10 @@ auto OrdinaryForwarder::forward(
   const auto &route = resolved->route;
   const auto source = stored.message.message.conversation;
   const auto digest = calculate_hash(
-      domain::Json::array(
-          {pair_id_, stored.source.source_platform, stored.source.source_bot,
-           stored.source.conversation_id, stored.source.message_id,
-           domain::Json(source), domain::Json(route.target)})
+      bot::Json::array({pair_id_, stored.source.source_platform,
+                        stored.source.source_bot, stored.source.conversation_id,
+                        stored.source.message_id, bot::Json(source),
+                        bot::Json(route.target)})
           .dump());
   if (digest.empty())
     throw std::runtime_error("Telegram delivery identity hashing failed");
@@ -369,32 +366,32 @@ auto OrdinaryForwarder::forward(
             encode("obcx.bot.MessageRef.cbor", stored.message.message))
       throw std::runtime_error(
           "Telegram delivery identity collision or corrupt scope");
-    result.domain_delivery =
+    result.bot_delivery =
         BridgeDeliveryResult{std::move(*existing), std::nullopt, false};
     co_return result;
   }
   // Recipe declarations are local, not a claim of current provider permission.
   // Reject absent target kinds before source downloads; never relabel ordinary
   // audio as Voice or a file as Image to bypass the installed recipe boundary.
-  const auto capabilities = require(
-      co_await domain::BotClient{*gateway_}.capabilities({route.target}));
+  const auto capabilities =
+      require(co_await bot::BotClient{*gateway_}.capabilities({route.target}));
   if (capabilities.conversation != route.target)
     throw std::runtime_error(
         "Telegram forwarding target capability scope mismatch");
   check_media_capabilities(stored.message, capabilities);
   const auto media_count =
       std::ranges::count_if(stored.message.body, [](const auto &block) {
-        return std::holds_alternative<domain::ReceivedMedia>(block);
+        return std::holds_alternative<bot::ReceivedMedia>(block);
       });
-  domain::SendLimits limits{1, 0, 0};
+  bot::SendLimits limits{1, 0, 0};
   if (media_count) {
     const auto item = config_->qq_media_download_max_bytes;
-    if (!item || item > domain::detail::domain_maximum_bytes)
+    if (!item || item > bot::detail::bot_maximum_bytes)
       throw std::invalid_argument("invalid configured Telegram read budget");
     const auto count = static_cast<std::size_t>(media_count);
     limits = {1, item,
-              count > domain::detail::domain_maximum_bytes / item
-                  ? domain::detail::domain_maximum_bytes
+              count > bot::detail::bot_maximum_bytes / item
+                  ? bot::detail::bot_maximum_bytes
                   : count * item};
   }
   const auto target = route.target;
@@ -409,7 +406,7 @@ auto OrdinaryForwarder::forward(
       pair_id_,
       {std::move(prepared.member)},
       {target, std::move(prepared.body), std::move(prepared.reply),
-       domain::DeliveryPolicy::SingleMessageOnly, limits},
+       bot::DeliveryPolicy::SingleMessageOnly, limits},
       std::move(prepared.origins),
       BridgeQuoteAnchor::FirstConfirmed,
       stored.message.received_at.unix_milliseconds,
@@ -421,35 +418,35 @@ auto OrdinaryForwarder::forward(
                 config_->max_retry_interval_sec}}
           : std::nullopt,
       std::move(publication)};
-  result.domain_delivery = co_await send_bridge_delivery(
+  result.bot_delivery = co_await send_bridge_delivery(
       gateway_, repository_, blocking_, references_, std::move(request));
   co_return result;
 }
 
 void OrdinaryForwarder::check_media_capabilities(
-    const domain::MessageReceived &message,
-    const domain::ConversationCapabilities &capabilities) {
+    const bot::MessageReceived &message,
+    const bot::ConversationCapabilities &capabilities) {
   for (const auto &block : message.body) {
-    if (const auto *media = std::get_if<domain::ReceivedMedia>(&block)) {
-      const auto supports = [&](domain::MediaKind kind) {
+    if (const auto *media = std::get_if<bot::ReceivedMedia>(&block)) {
+      const auto supports = [&](bot::MediaKind kind) {
         return std::ranges::any_of(
             capabilities.media, [&](const auto &capability) {
               return capability.kind == kind &&
-                     capability.source == domain::MediaSourceKind::Bytes;
+                     capability.source == bot::MediaSourceKind::Bytes;
             });
       };
       const auto sticker = obcx::telegram::bot::sticker_view(*media);
       if (sticker &&
           sticker->format == obcx::telegram::bot::StickerFormat::AnimatedTgs)
-        continue; // Explicit text marker only; no TGS acquisition/decoder.
+        continue; // Dropped without acquisition; there is no TGS decoder.
       const auto target_kind =
           !sticker ? media->kind
           : sticker->format == obcx::telegram::bot::StickerFormat::StaticWebp
-              ? domain::MediaKind::Image
-              : domain::MediaKind::Animation;
+              ? bot::MediaKind::Image
+              : bot::MediaKind::Animation;
       if (!supports(target_kind) ||
-          (!sticker && media->kind == domain::MediaKind::Animation &&
-           !supports(domain::MediaKind::Video)))
+          (!sticker && media->kind == bot::MediaKind::Animation &&
+           !supports(bot::MediaKind::Video)))
         throw std::runtime_error(
             std::string{"target has no installed owned-byte recipe for source "
                         "media kind: "} +
@@ -461,7 +458,7 @@ void OrdinaryForwarder::check_media_capabilities(
 auto OrdinaryForwarder::prepare_member(
     const obcx::message_store::events::MessageStored &stored,
     ResolvedSource resolved, std::string member_id, bool include_context,
-    bool defer_captions, bool allow_edit_marker, domain::SendLimits limits,
+    bool defer_captions, bool allow_edit_marker, bot::SendLimits limits,
     AttachmentFailurePolicy attachment_failure_policy)
     -> boost::asio::awaitable<PreparedMember> {
   limits.validate();
@@ -469,14 +466,14 @@ auto OrdinaryForwarder::prepare_member(
       (!defer_captions || !stored.message.media_group))
     throw std::invalid_argument(
         "attachment omission requires album membership and retained captions");
-  domain::OperationCorrelation{member_id}.validate();
+  bot::OperationCorrelation{member_id}.validate();
   if (const auto reason =
           body_rejection_reason(stored.message, allow_edit_marker))
     throw std::invalid_argument("unsupported Telegram preparation content: " +
                                 *reason);
   const auto &route = resolved.route;
   const auto source = stored.message.message.conversation;
-  std::optional<domain::MessageRef> reply;
+  std::optional<bot::MessageRef> reply;
   if (include_context && stored.message.reply)
     reply = co_await blocking_->run([repository = repository_, pair = pair_id_,
                                      target = route.target,
@@ -485,28 +482,27 @@ auto OrdinaryForwarder::prepare_member(
     });
   std::vector<std::string> inputs;
   std::vector<ledger::Provenance> prefix_origins;
-  domain::RichText prefix;
+  bot::RichText prefix;
   if (include_context && route.show_sender) {
     std::optional<std::string> name;
     if (const auto *sender =
-            std::get_if<domain::KnownUser>(&stored.message.sender))
+            std::get_if<bot::KnownUser>(&stored.message.sender))
       name = co_await display_name(sender->user, source);
     // Successful common member normalization remains authoritative for known
     // users. Missing/failed profiles use the original observed presentation;
     // conversation and unknown senders never trigger a user lookup.
     if (!name)
       name = resolved.observed_sender_name;
-    prefix.emplace_back(
-        domain::Text{"[" + name.value_or("Unknown") + "]\t", {}});
+    prefix.emplace_back(bot::Text{"[" + name.value_or("Unknown") + "]\t", {}});
     inputs.push_back("sender");
     prefix_origins.push_back({member_id, "sender"});
   }
   if (include_context && !reply && resolved.genuine_reply) {
-    prefix.emplace_back(domain::Text{"[回复一条消息] ", {}});
+    prefix.emplace_back(bot::Text{"[回复一条消息] ", {}});
     inputs.push_back("reply");
     prefix_origins.push_back({member_id, "reply"});
   }
-  domain::MessageBody body;
+  bot::MessageBody body;
   std::vector<std::optional<std::vector<ledger::Provenance>>> origins;
   // QQ serializes attachment captions after their media segment. Keep the
   // predecessor's sender/reply prefix before media as an explicit text block.
@@ -514,12 +510,14 @@ auto OrdinaryForwarder::prepare_member(
     body.emplace_back(std::move(prefix));
     origins.emplace_back(std::move(prefix_origins));
   }
+  const auto prefix_blocks = body.size();
+  bool dropped_sticker = false;
   std::size_t bytes = 0;
-  std::vector<std::pair<domain::RichText, std::vector<ledger::Provenance>>>
+  std::vector<std::pair<bot::RichText, std::vector<ledger::Provenance>>>
       trailing_captions;
   for (std::size_t index = 0; index < stored.message.body.size(); ++index) {
-    if (const auto *marker = std::get_if<domain::UnsupportedContent>(
-            &stored.message.body[index])) {
+    if (const auto *marker =
+            std::get_if<bot::UnsupportedContent>(&stored.message.body[index])) {
       if (allow_edit_marker && marker->category == "telegram.edited")
         continue; // Control observation, not a fabricated/renumbered body.
       if (handled_media_marker(stored.message, index))
@@ -541,15 +539,15 @@ auto OrdinaryForwarder::prepare_member(
       inputs.push_back(marker_key);
       contribution.push_back({member_id, std::move(marker_key)});
     }
-    if (const auto *text = std::get_if<domain::ReceivedRichText>(
-            &stored.message.body[index])) {
+    if (const auto *text =
+            std::get_if<bot::ReceivedRichText>(&stored.message.body[index])) {
       auto rendered = co_await render_text(*text, source);
       if (rendered.empty())
         continue;
       body.emplace_back(std::move(rendered));
     } else {
       const auto &media =
-          std::get<domain::ReceivedMedia>(stored.message.body[index]);
+          std::get<bot::ReceivedMedia>(stored.message.body[index]);
       auto caption = co_await render_text(media.caption, source);
       if (defer_captions && !caption.empty()) {
         trailing_captions.emplace_back(std::move(caption), contribution);
@@ -568,11 +566,16 @@ auto OrdinaryForwarder::prepare_member(
             media, std::move(caption),
             std::min(limits.maximum_media_item_bytes, remaining));
         bytes += prepared.prepared_bytes;
+        if (const auto *text = std::get_if<bot::RichText>(&prepared.block)) {
+          dropped_sticker = true;
+          if (text->empty())
+            continue;
+        }
         body.push_back(std::move(prepared.block));
         origins.emplace_back(std::move(contribution));
         continue;
       }
-      if (media.kind == domain::MediaKind::Animation) {
+      if (media.kind == bot::MediaKind::Animation) {
         auto prepared = co_await media_processor_->prepare_animation(
             media, std::move(caption),
             std::min(limits.maximum_media_item_bytes, remaining));
@@ -585,7 +588,7 @@ auto OrdinaryForwarder::prepare_member(
       // chooses ordinary Video presentation, as its predecessor did.
       const auto video_note = obcx::telegram::bot::video_note_view(media);
       const auto budget = std::min(limits.maximum_media_item_bytes, remaining);
-      domain::BytesSource data;
+      bot::BytesSource data;
       try {
         // Album-only early rejection uses the original declared size. It does
         // not assert a cloud getFile limit or change ordinary/edit policy.
@@ -594,11 +597,11 @@ auto OrdinaryForwarder::prepare_member(
             (!budget || (media.metadata.size_bytes &&
                          *media.metadata.size_bytes > budget)))
           throw BridgeBotOperationFailure(
-              {.code = domain::BotOperationErrorCode::MediaTooLarge,
+              {.code = bot::BotOperationErrorCode::MediaTooLarge,
                .message = "album attachment exceeds bridge byte budget",
                .retryable = false,
                .submission_safety =
-                   domain::SubmissionSafety::DefinitelyNotSubmitted});
+                   bot::SubmissionSafety::DefinitelyNotSubmitted});
         data = co_await read_bridge_attachment(
             gateway_, video_note ? *video_note : media, budget);
       } catch (const BridgeBotOperationFailure &failure) {
@@ -608,14 +611,14 @@ auto OrdinaryForwarder::prepare_member(
         // Cancellation, retired origin/route, malformed identity/evidence and
         // all untyped errors escape. No send/persistence is inside this catch.
         const bool unavailable =
-            error.code == domain::BotOperationErrorCode::MediaTooLarge ||
-            error.code == domain::BotOperationErrorCode::ProviderRejected ||
-            error.code == domain::BotOperationErrorCode::TransportFailure;
+            error.code == bot::BotOperationErrorCode::MediaTooLarge ||
+            error.code == bot::BotOperationErrorCode::ProviderRejected ||
+            error.code == bot::BotOperationErrorCode::TransportFailure;
         if (attachment_failure_policy !=
                 AttachmentFailurePolicy::OmitUnavailable ||
             !unavailable ||
             error.submission_safety !=
-                domain::SubmissionSafety::DefinitelyNotSubmitted)
+                bot::SubmissionSafety::DefinitelyNotSubmitted)
           throw;
         // Numeric status only: native prose/locators may contain credentials.
         const auto provider_code =
@@ -633,7 +636,7 @@ auto OrdinaryForwarder::prepare_member(
                   media.metadata.size_bytes
                       ? std::to_string(*media.metadata.size_bytes)
                       : "unknown",
-                  budget, domain::error_code_id(error.code), provider_code,
+                  budget, bot::error_code_id(error.code), provider_code,
                   error.retryable);
         // Input registration and deferred caption preparation precede the
         // read. Do not fabricate a media output or its contribution.
@@ -641,28 +644,28 @@ auto OrdinaryForwarder::prepare_member(
       }
       bytes += data.bytes.size();
       switch (media.kind) {
-      case domain::MediaKind::Image:
-        body.emplace_back(domain::Image{std::move(data), std::move(caption)});
+      case bot::MediaKind::Image:
+        body.emplace_back(bot::Image{std::move(data), std::move(caption)});
         break;
-      case domain::MediaKind::Video:
+      case bot::MediaKind::Video:
         // The predecessor explicitly presents video-notes as ordinary video.
         // This is Bridge's conversion, not an SDK claim of round presentation.
-        body.emplace_back(domain::Video{std::move(data), std::move(caption)});
+        body.emplace_back(bot::Video{std::move(data), std::move(caption)});
         break;
-      case domain::MediaKind::Audio:
-      case domain::MediaKind::Voice:
-        body.emplace_back(domain::Audio{std::move(data),
-                                        media.kind == domain::MediaKind::Voice
-                                            ? domain::AudioKind::Voice
-                                            : domain::AudioKind::Audio,
-                                        std::move(caption)});
+      case bot::MediaKind::Audio:
+      case bot::MediaKind::Voice:
+        body.emplace_back(bot::Audio{std::move(data),
+                                     media.kind == bot::MediaKind::Voice
+                                         ? bot::AudioKind::Voice
+                                         : bot::AudioKind::Audio,
+                                     std::move(caption)});
         break;
-      case domain::MediaKind::File: {
+      case bot::MediaKind::File: {
         if (!data.metadata.filename)
           throw std::runtime_error("Telegram file lacks display filename");
         auto filename = *data.metadata.filename;
-        body.emplace_back(domain::File{std::move(data), std::move(filename),
-                                       std::move(caption)});
+        body.emplace_back(bot::File{std::move(data), std::move(filename),
+                                    std::move(caption)});
         break;
       }
       default:
@@ -673,6 +676,13 @@ auto OrdinaryForwarder::prepare_member(
       }
     }
     origins.emplace_back(std::move(contribution));
+  }
+  // A dropped sticker must not leave a message consisting of only the
+  // sender/reply prefix.
+  if (dropped_sticker && body.size() == prefix_blocks &&
+      trailing_captions.empty()) {
+    body.clear();
+    origins.clear();
   }
   co_return PreparedMember{{std::move(member_id), stored.message.message,
                             stored.message, stored.message.media_group,

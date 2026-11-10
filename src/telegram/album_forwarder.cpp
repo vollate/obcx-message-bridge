@@ -10,8 +10,8 @@
 
 namespace bridge::telegram {
 namespace {
-namespace domain = obcx::bot;
-template <class T> auto require(domain::BotOperationResult<T> value) -> T {
+namespace bot = obcx::bot;
+template <class T> auto require(bot::BotOperationResult<T> value) -> T {
   value.validate();
   if (!value.ok())
     throw BridgeBotOperationFailure(std::move(*value.error));
@@ -19,7 +19,7 @@ template <class T> auto require(domain::BotOperationResult<T> value) -> T {
 }
 template <class T>
 auto encode(std::string name, const T &value) -> ledger::OpaqueValue {
-  auto bytes = domain::Json::to_cbor(domain::Json(value));
+  auto bytes = bot::Json::to_cbor(bot::Json(value));
   return {
       "obcx.bot." + std::move(name) + ".cbor", 1, {bytes.begin(), bytes.end()}};
 }
@@ -30,7 +30,7 @@ auto OrdinaryForwarder::forward_album(
     std::vector<BridgeDeliveryPublication> publications)
     -> boost::asio::awaitable<BridgeForwardResult> {
   if (stored.empty() || stored.size() != publications.size() ||
-      stored.size() > domain::detail::domain_maximum_items)
+      stored.size() > bot::detail::bot_maximum_items)
     throw std::invalid_argument("invalid Telegram album batch or policy");
   const auto group = stored.front().message.media_group;
   if (!group)
@@ -40,7 +40,7 @@ auto OrdinaryForwarder::forward_album(
     item.message.validate();
     item.source.validate(item.message);
     if (item.message.media_group != group ||
-        !members.insert(domain::Json(item.message.message).dump()).second)
+        !members.insert(bot::Json(item.message.message).dump()).second)
       throw std::invalid_argument("Telegram album mixed or duplicate source");
   }
 
@@ -68,7 +68,7 @@ auto OrdinaryForwarder::forward_album(
           "Telegram album contains unsupported content: " + *reason);
   const auto route = sources.front().route;
   const auto source = group->conversation;
-  std::vector<domain::MessageRef> refs;
+  std::vector<bot::MessageRef> refs;
   std::vector<ledger::AlbumObservation> observations;
   for (const auto &item : stored) {
     refs.push_back(item.message.message);
@@ -105,57 +105,56 @@ auto OrdinaryForwarder::forward_album(
   if (eligible.empty())
     co_return BridgeForwardResult{};
 
-  const auto capabilities = require(
-      co_await domain::BotClient{*gateway_}.capabilities({route.target}));
+  const auto capabilities =
+      require(co_await bot::BotClient{*gateway_}.capabilities({route.target}));
   if (capabilities.conversation != route.target)
     throw std::runtime_error("album capability scope mismatch");
   std::size_t media_count = 0;
   std::size_t blocks = 0;
-  auto identity = domain::Json::array();
+  auto identity = bot::Json::array();
   for (const auto index : eligible) {
     const auto &item = stored[index];
     check_media_capabilities(item.message, capabilities);
-    if (item.message.body.size() >
-        domain::detail::domain_maximum_items - blocks)
+    if (item.message.body.size() > bot::detail::bot_maximum_items - blocks)
       throw std::invalid_argument("album input block bound exceeded");
     blocks += item.message.body.size();
     media_count += static_cast<std::size_t>(
         std::ranges::count_if(item.message.body, [](const auto &block) {
-          return std::holds_alternative<domain::ReceivedMedia>(block);
+          return std::holds_alternative<bot::ReceivedMedia>(block);
         }));
-    identity.push_back(domain::Json::array(
-        {item.source.source_platform, item.source.source_bot,
-         item.source.conversation_id, item.source.message_id,
-         domain::Json(item.message.message)}));
+    identity.push_back(
+        bot::Json::array({item.source.source_platform, item.source.source_bot,
+                          item.source.conversation_id, item.source.message_id,
+                          bot::Json(item.message.message)}));
   }
-  domain::SendLimits limits{1, 0, 0};
+  bot::SendLimits limits{1, 0, 0};
   if (media_count) {
     const auto item = config_->qq_media_download_max_bytes;
-    if (!item || item > domain::detail::domain_maximum_bytes)
+    if (!item || item > bot::detail::bot_maximum_bytes)
       throw std::invalid_argument("invalid configured album byte budget");
     limits = {1, item,
-              media_count > domain::detail::domain_maximum_bytes / item
-                  ? domain::detail::domain_maximum_bytes
+              media_count > bot::detail::bot_maximum_bytes / item
+                  ? bot::detail::bot_maximum_bytes
                   : media_count * item};
   }
   const auto digest =
-      calculate_hash(domain::Json::array({pair_id_, domain::Json(*group),
-                                          domain::Json(route.target), identity})
+      calculate_hash(bot::Json::array({pair_id_, bot::Json(*group),
+                                       bot::Json(route.target), identity})
                          .dump());
   if (digest.empty())
     throw std::runtime_error("album delivery identity hashing failed");
   const auto delivery_id = "tg-album-v1:" + digest;
   std::vector<BridgeDeliveryMember> prepared_members;
-  domain::MessageBody body;
+  bot::MessageBody body;
   std::vector<std::optional<std::vector<ledger::Provenance>>> origins;
-  std::vector<std::pair<domain::RichText, std::vector<ledger::Provenance>>>
+  std::vector<std::pair<bot::RichText, std::vector<ledger::Provenance>>>
       captions;
-  std::optional<domain::MessageRef> reply;
+  std::optional<bot::MessageRef> reply;
   std::size_t bytes = 0;
   for (std::size_t position = 0; position < eligible.size(); ++position) {
     const auto index = eligible[position];
     const auto remaining = limits.maximum_media_total_bytes - bytes;
-    const domain::SendLimits member_limits{
+    const bot::SendLimits member_limits{
         1, std::min(limits.maximum_media_item_bytes, remaining), remaining};
     auto prepared = co_await prepare_member(
         stored[index], std::move(sources[index]),
@@ -181,7 +180,7 @@ auto OrdinaryForwarder::forward_album(
   bool first_caption = true;
   for (auto &[caption, contribution] : captions) {
     if (!first_caption)
-      caption.insert(caption.begin(), domain::Text{"\n", {}});
+      caption.insert(caption.begin(), bot::Text{"\n", {}});
     first_caption = false;
     body.emplace_back(std::move(caption));
     origins.emplace_back(std::move(contribution));
@@ -196,7 +195,7 @@ auto OrdinaryForwarder::forward_album(
       pair_id_,
       std::move(prepared_members),
       {route.target, std::move(body), std::move(reply),
-       domain::DeliveryPolicy::SingleMessageOnly, limits},
+       bot::DeliveryPolicy::SingleMessageOnly, limits},
       std::move(origins),
       BridgeQuoteAnchor::FirstConfirmed,
       primary.message.received_at.unix_milliseconds,
@@ -211,7 +210,7 @@ auto OrdinaryForwarder::forward_album(
   request.album_observations = std::move(observations);
   BridgeForwardResult result;
   try {
-    result.domain_delivery = co_await send_bridge_delivery(
+    result.bot_delivery = co_await send_bridge_delivery(
         gateway_, repository_, blocking_, references_, std::move(request));
   } catch (const BridgeAlbumBatchSuppressed &) {
     co_return result; // Concurrent overlap is durably associated, never sent.

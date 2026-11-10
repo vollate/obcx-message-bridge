@@ -15,11 +15,10 @@ auto document(const ledger::OpaqueValue &value, std::string_view codec)
                          codec == "obcx.bot.BridgeDeliveryPolicy.cbor")
                             ? 2
                             : 1) ||
-      value.bytes.empty() ||
-      value.bytes.size() > d::detail::domain_maximum_bytes)
+      value.bytes.empty() || value.bytes.size() > d::detail::bot_maximum_bytes)
     throw std::runtime_error("unsupported bridge publication evidence");
   auto result = d::Json::from_cbor(value.bytes.begin(), value.bytes.end());
-  d::detail::validate_domain_wire(result);
+  d::detail::validate_bot_wire(result);
   const auto canonical = d::Json::to_cbor(result);
   if (std::string(canonical.begin(), canonical.end()) != value.bytes)
     throw std::runtime_error("noncanonical bridge publication evidence");

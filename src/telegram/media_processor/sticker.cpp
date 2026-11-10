@@ -5,13 +5,13 @@
 #include <algorithm>
 #include <array>
 #include <common/logger.hpp>
-#include <core/bot/domain_codec.hpp>
+#include <core/bot/bot_codec.hpp>
 #include <filesystem>
 #include <span>
 
 namespace bridge::telegram {
 namespace {
-namespace domain = obcx::bot;
+namespace bot = obcx::bot;
 using Bytes = std::span<const std::uint8_t>;
 
 auto le32(Bytes bytes, std::size_t at) -> std::uint32_t {
@@ -115,7 +115,7 @@ auto static_png_dimensions(Bytes bytes) -> std::optional<qq::PhotoDimensions> {
   bool header = false, data = false;
   qq::PhotoDimensions dimensions{};
   while (bytes.size() - cursor >= 12 &&
-         ++chunks <= domain::detail::domain_maximum_items) {
+         ++chunks <= bot::detail::bot_maximum_items) {
     const std::size_t length = be32(cursor);
     const auto kind = tag(bytes, cursor + 4);
     if (length > bytes.size() - cursor - 12 || kind == "acTL" ||
@@ -142,20 +142,6 @@ auto static_png_dimensions(Bytes bytes) -> std::optional<qq::PhotoDimensions> {
     cursor += length + 12;
   }
   return std::nullopt;
-}
-
-auto sticker_label(const obcx::telegram::bot::StickerView &sticker,
-                   bool description) -> std::string {
-  std::string label = "[贴纸";
-  if (sticker.emoji)
-    label += " " + *sticker.emoji;
-  if (description &&
-      sticker.format == obcx::telegram::bot::StickerFormat::VideoWebm)
-    label += " 视频";
-  if (description &&
-      sticker.format == obcx::telegram::bot::StickerFormat::AnimatedTgs)
-    label += " 动画暂不支持";
-  return label + "]";
 }
 
 auto prepare_static_png(const PathManager &mapper, const std::string &original,
@@ -221,8 +207,8 @@ auto prepare_static_png(const PathManager &mapper, const std::string &original,
 }
 } // namespace
 
-auto TelegramMediaProcessor::prepare_sticker(domain::ReceivedMedia media,
-                                             domain::RichText caption,
+auto TelegramMediaProcessor::prepare_sticker(bot::ReceivedMedia media,
+                                             bot::RichText caption,
                                              std::size_t maximum_bytes)
     -> boost::asio::awaitable<PreparedTelegramMedia> {
   validate_source(media);
@@ -231,11 +217,10 @@ auto TelegramMediaProcessor::prepare_sticker(domain::ReceivedMedia media,
     throw std::invalid_argument("typed sticker observation required");
   const bool tgs =
       sticker->format == obcx::telegram::bot::StickerFormat::AnimatedTgs;
-  // TGS is an explicit text-only representation, not an acquisition. An
-  // exhausted media budget must not suppress its unsupported-format notice.
+  // TGS is never acquired, so it needs no byte budget.
   if ((!maximum_bytes && !tgs) ||
       maximum_bytes > config_->qq_media_download_max_bytes ||
-      maximum_bytes > domain::detail::domain_maximum_bytes)
+      maximum_bytes > bot::detail::bot_maximum_bytes)
     throw std::invalid_argument("invalid Telegram sticker byte budget");
   std::size_t prepared_bytes = 0;
   try {
@@ -257,8 +242,6 @@ auto TelegramMediaProcessor::prepare_sticker(domain::ReceivedMedia media,
       const auto mime = MediaProcessor::detect_mime_type_from_content(
           std::string(bytes.begin(),
                       bytes.begin() + std::min(bytes.size(), std::size_t{32})));
-      // Successful media keeps only the source caption; the generated sticker
-      // label is reserved for the text-only fallback below.
       auto metadata = media.metadata;
       metadata.mime_type = mime;
       metadata.size_bytes = bytes.size();
@@ -272,8 +255,8 @@ auto TelegramMediaProcessor::prepare_sticker(domain::ReceivedMedia media,
                                   .replace_extension(".gif")
                                   .string();
         co_return PreparedTelegramMedia{
-            domain::Animation{
-                domain::BytesSource{std::move(bytes), std::move(metadata)},
+            bot::Animation{
+                bot::BytesSource{std::move(bytes), std::move(metadata)},
                 std::move(caption)},
             prepared_bytes};
       }
@@ -292,22 +275,21 @@ auto TelegramMediaProcessor::prepare_sticker(domain::ReceivedMedia media,
                   .replace_extension(mime == "image/png" ? ".png" : ".jpg")
                   .string();
         co_return PreparedTelegramMedia{
-            domain::Image{
-                domain::BytesSource{std::move(bytes), std::move(metadata)},
-                std::move(caption)},
+            bot::Image{bot::BytesSource{std::move(bytes), std::move(metadata)},
+                       std::move(caption)},
             prepared_bytes};
       }
-      OBCX_WARN("贴纸缓存格式不受目标支持，保留文字提示");
+      OBCX_WARN("贴纸缓存格式不受目标支持，跳过该贴纸");
+    } else {
+      OBCX_WARN("TGS 动画贴纸暂不支持，跳过该贴纸");
     }
   } catch (const TelegramCacheScopeMismatch &) {
     throw;
   } catch (const std::exception &error) {
     rethrow_if_cancelled(error);
-    OBCX_WARN("贴纸字节准备失败，保留文字提示: {}", error.what());
+    OBCX_WARN("贴纸字节准备失败，跳过该贴纸: {}", error.what());
   }
-  domain::RichText fallback{domain::Text{sticker_label(*sticker, tgs), {}}};
-  for (auto &span : caption)
-    fallback.push_back(std::move(span));
-  co_return PreparedTelegramMedia{std::move(fallback), prepared_bytes};
+  // An unsendable sticker is dropped rather than replaced by a text label.
+  co_return PreparedTelegramMedia{std::move(caption), prepared_bytes};
 }
 } // namespace bridge::telegram

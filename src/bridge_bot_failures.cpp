@@ -2,10 +2,44 @@
 
 #include <boost/asio/error.hpp>
 #include <boost/system/system_error.hpp>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
 namespace bridge {
+namespace {
+
+auto describe_error_code(const obcx::bot::BotOperationErrorCode code)
+    -> std::string_view {
+  using Code = obcx::bot::BotOperationErrorCode;
+  switch (code) {
+  case Code::InvalidRequest:
+    return "request was rejected before sending";
+  case Code::RouteNotFound:
+    return "no bot is configured for the target";
+  case Code::SurfaceMismatch:
+    return "target belongs to a different platform";
+  case Code::UnsupportedAction:
+    return "platform does not support this action";
+  case Code::ProviderRejected:
+    return "platform rejected the request";
+  case Code::MalformedResponse:
+    return "platform response could not be understood";
+  case Code::TransportFailure:
+    return "network request failed";
+  case Code::MediaTooLarge:
+    return "media is too large";
+  case Code::Cancelled:
+    return "operation was cancelled";
+  case Code::OutcomeUnknown:
+    return "result is unknown";
+  case Code::CacheUnavailable:
+    return "required cached data is unavailable";
+  }
+  return "operation failed";
+}
+
+} // namespace
 
 auto is_bridge_operation_cancelled(const std::exception &error) noexcept
     -> bool {
@@ -34,12 +68,13 @@ auto classify_bridge_operation_failure(const std::exception &error)
   const bool send_effects =
       send && (!send->failure().confirmed_messages.empty() ||
                send->failure().may_have_unconfirmed_messages);
-  auto diagnostic = std::string{obcx::bot::error_code_id(failure.code)};
+  auto diagnostic = std::string{describe_error_code(failure.code)} + " (" +
+                    std::string{obcx::bot::error_code_id(failure.code)};
   if (failure.provider_code && !failure.provider_code->empty()) {
-    diagnostic += " (provider_code=" +
-                  obcx::bot::redact_bot_diagnostic(*failure.provider_code) +
-                  ")";
+    diagnostic += ", platform error " +
+                  obcx::bot::redact_bot_diagnostic(*failure.provider_code);
   }
+  diagnostic += ")";
   if (!failure.message.empty()) {
     diagnostic += ": " + obcx::bot::redact_bot_diagnostic(failure.message);
   }

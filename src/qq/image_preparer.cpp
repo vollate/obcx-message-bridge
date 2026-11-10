@@ -15,7 +15,7 @@
 
 namespace bridge::qq {
 namespace {
-namespace domain = obcx::bot;
+namespace bot = obcx::bot;
 
 // These are the installed Telegram photo formats, not an implicit conversion
 // of animation/WebP/BMP into a static frame. PNG chunks are checked before the
@@ -94,21 +94,21 @@ auto read_configured_placeholder(std::shared_ptr<const BridgeConfig> config,
 }
 
 auto owned_photo(DownloadedImage image, std::size_t maximum_bytes)
-    -> domain::BytesSource {
+    -> bot::BytesSource {
   if (image.data.empty() || image.data.size() > maximum_bytes)
     throw std::runtime_error("prepared photo exceeds explicit byte budget");
   const auto mime = static_photo_mime(image.data);
   if (!mime || inspect_photo_dimensions(image.data).status !=
                    PhotoDimensionStatus::Compliant)
     throw std::runtime_error("prepared photo is not a supported static photo");
-  domain::MediaMetadata metadata;
+  bot::MediaMetadata metadata;
   metadata.mime_type = *mime;
   metadata.filename = image.filename;
   metadata.size_bytes = image.data.size();
   const auto dimensions = inspect_photo_dimensions(image.data).dimensions;
   metadata.width = dimensions.width;
   metadata.height = dimensions.height;
-  domain::BytesSource result{{image.data.begin(), image.data.end()}, metadata};
+  bot::BytesSource result{{image.data.begin(), image.data.end()}, metadata};
   result.validate();
   return result;
 }
@@ -125,10 +125,10 @@ auto normalization_status(PhotoNormalizationFailure failure)
 }
 } // namespace
 
-auto prepare_photos(std::shared_ptr<domain::BotOperationGateway> gateway,
+auto prepare_photos(std::shared_ptr<bot::BotOperationGateway> gateway,
                     std::shared_ptr<obcx::core::BlockingExecutor> blocking,
                     std::shared_ptr<const BridgeConfig> config,
-                    std::vector<PhotoInput> media, domain::SendLimits limits)
+                    std::vector<PhotoInput> media, bot::SendLimits limits)
     -> boost::asio::awaitable<std::vector<PreparedPhoto>> {
   std::vector<PhotoReadInput> inputs;
   inputs.reserve(media.size());
@@ -138,11 +138,11 @@ auto prepare_photos(std::shared_ptr<domain::BotOperationGateway> gateway,
                              std::move(config), std::move(inputs), limits);
 }
 
-auto prepare_read_photos(std::shared_ptr<domain::BotOperationGateway> gateway,
+auto prepare_read_photos(std::shared_ptr<bot::BotOperationGateway> gateway,
                          std::shared_ptr<obcx::core::BlockingExecutor> blocking,
                          std::shared_ptr<const BridgeConfig> config,
                          std::vector<PhotoReadInput> media,
-                         domain::SendLimits limits)
+                         bot::SendLimits limits)
     -> boost::asio::awaitable<std::vector<PreparedPhoto>> {
   limits.validate();
   if (!gateway || !blocking || !config || media.empty() ||
@@ -160,7 +160,7 @@ auto prepare_read_photos(std::shared_ptr<domain::BotOperationGateway> gateway,
   }
   std::vector<PreparedPhoto> prepared;
   prepared.reserve(media.size());
-  std::optional<domain::BytesSource> placeholder;
+  std::optional<bot::BytesSource> placeholder;
   std::size_t total = 0;
   for (auto &input : media) {
     const auto &ref = input.media;
@@ -170,18 +170,18 @@ auto prepare_read_photos(std::shared_ptr<domain::BotOperationGateway> gateway,
       throw std::runtime_error("photo preparation total byte budget exhausted");
     auto read = std::move(input.result);
     if (ref && !read)
-      read = co_await domain::BotClient{*gateway}.read_media(
-          domain::ReadMediaRequest{*ref, maximum});
+      read = co_await bot::BotClient{*gateway}.read_media(
+          bot::ReadMediaRequest{*ref, maximum});
     if (read)
       read->validate();
     auto status = ref ? PhotoPreparationStatus::ReadUnavailable
                       : PhotoPreparationStatus::SourceUnavailable;
-    auto kind = domain::MediaKind::Image;
-    std::optional<domain::BotOperationErrorCode> read_error;
-    std::optional<domain::BytesSource> source;
+    auto kind = bot::MediaKind::Image;
+    std::optional<bot::BotOperationErrorCode> read_error;
+    std::optional<bot::BytesSource> source;
     if (read && !read->ok()) {
       read_error = read->error->code;
-      if (*read_error == domain::BotOperationErrorCode::Cancelled)
+      if (*read_error == bot::BotOperationErrorCode::Cancelled)
         // Preserve cancellation classification and the original operation
         // evidence. It must not become a generic preparation failure.
         throw BridgeBotOperationFailure(std::move(*read->error));
@@ -195,10 +195,9 @@ auto prepare_read_photos(std::shared_ptr<domain::BotOperationGateway> gateway,
           .filename = "qq-media.jpg",
           .data = {blob.source.bytes.begin(), blob.source.bytes.end()}};
       const auto mime = static_photo_mime(image.data);
-      const bool image_kind =
-          !blob.kind || *blob.kind == domain::MediaKind::Image;
+      const bool image_kind = !blob.kind || *blob.kind == bot::MediaKind::Image;
       std::optional<PhotoNormalizationResult> normalized;
-      if ((image_kind || blob.kind == domain::MediaKind::Animation) &&
+      if ((image_kind || blob.kind == bot::MediaKind::Animation) &&
           MediaProcessor::detect_mime_type_from_content(image.data) ==
               "image/gif") {
         const auto dimensions = inspect_photo_dimensions(image.data);
@@ -225,7 +224,7 @@ auto prepare_read_photos(std::shared_ptr<domain::BotOperationGateway> gateway,
           blob.source.metadata.height = dimensions.dimensions.height;
           blob.source.validate();
           source = std::move(blob.source);
-          kind = domain::MediaKind::Animation;
+          kind = bot::MediaKind::Animation;
           status = PhotoPreparationStatus::Ready;
         }
       } else if (!image_kind || !mime) {

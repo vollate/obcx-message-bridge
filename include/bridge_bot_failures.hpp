@@ -1,6 +1,6 @@
 #pragma once
 
-#include <core/bot/domain_messaging.hpp>
+#include <core/bot/bot_messaging.hpp>
 
 #include <stdexcept>
 #include <string>

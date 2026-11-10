@@ -5,7 +5,7 @@
 #include <core/bot/bot_client.hpp>
 #include <core/bot/conversation_resolver.hpp>
 #include <onebot11/bot/operations.hpp>
-#include <telegram/bot/domain_operations.hpp>
+#include <telegram/bot/bot_operations.hpp>
 
 #include <map>
 #include <memory>
@@ -24,7 +24,7 @@ struct BridgeCommandSource {
   std::string conversation_id;
 };
 
-// Installed-domain-SDK-only command boundary. Legacy forwarding derives from
+// Installed-bot-SDK-only command boundary. Legacy forwarding derives from
 // this owner during migration; command handlers never include its native DTOs.
 class BridgeCommandOperations {
 public:

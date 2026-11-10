@@ -97,7 +97,7 @@ Storage models and repository methods accept installation ids explicitly; a plat
 
 The in-memory Telegram album key becomes `(source_installation, chat_id, media_group_id)`. In-memory retry callback registration is keyed by exact target installation, not platform. `ReceivedMessageRepository` queries the already-scoped Message Store columns using source platform, source bot, conversation id, and message id; it does not use a platform/message-only fallback.
 
-This change deliberately does not add missing conversation columns to every old Bridge mapping key. New and existing handlers continue supplying current group/topic values where already required. A later typed-ingress/domain migration can make every persisted message identity a complete conversation-scoped `BotMessageRef` without coupling that broader migration to multi-account isolation.
+This change deliberately does not add missing conversation columns to every old Bridge mapping key. New and existing handlers continue supplying current group/topic values where already required. A later typed-ingress/bot migration can make every persisted message identity a complete conversation-scoped `BotMessageRef` without coupling that broader migration to multi-account isolation.
 
 ### 4. Introduce a transactionally rebuilt, versioned Bridge schema
 
@@ -137,7 +137,7 @@ Tests retain separate operation counters and add colliding-id cases proving that
 - **[An operator selects the wrong legacy pair]** → Require an explicit existing pair id when inference is impossible, log a secret-safe migration summary, and validate row/platform counts transactionally before commit.
 - **[Pair removal strands durable retries or caches]** → Persist exact installations, report unavailable routes without fallback, and document an operator drain/inspection step before disabling installations.
 - **[Collection-contract support increases the V2 contract parser surface]** → Keep the extension optional, finite, deterministic, schema-1 compatible, and covered by malformed-contract plus validation-only tests.
-- **[Installation scoping does not solve native message-id collision between groups on the same bot]** → Preserve current behavior explicitly and defer complete conversation-scoped persistence to the typed-ingress/domain-model change.
+- **[Installation scoping does not solve native message-id collision between groups on the same bot]** → Preserve current behavior explicitly and defer complete conversation-scoped persistence to the typed-ingress/bot-model change.
 - **[One worker multiplexing several pairs can increase queue latency]** → Retain bounded batch/check behavior and measure pair-isolation/queue progression; do not add actor-local worker pools.
 - **[Legacy scalar support creates two config forms]** → Resolve both immediately into one canonical pair model, reject mixing, and document named pairs as the multi-account form.
 

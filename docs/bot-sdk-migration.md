@@ -1,4 +1,4 @@
-# Domain SDK migration — Bridge owner
+# Bot SDK migration — Bridge owner
 
 ## Current SDK 2.7.0 / Bridge schema 5
 
@@ -25,7 +25,7 @@ syntax checked, not executed by the assistant. No automatic migration, replay,
 provider query, database clearing, deployment or restart is included.
 
 Use a frozen matching SDK/core >=2.7.0,<3.0.0 and scripts/actor_build.py, not actor
-targets in the live core workspace. See core packaging/actors/domain-sdk-cutover.md
+targets in the live core workspace. See core packaging/actors/bot-sdk-cutover.md
 for offline CLI, backup/rollback boundaries and operator-owned runtime acceptance.
 
 ## QQ voice preparation
@@ -1624,7 +1624,7 @@ media kinds, special content, albums and non-user senders remain unmigrated.
 
 Each read is bounded by the existing qq_media_download_max_bytes and the
 remaining explicit total. The send total is derived as min(image count * that
-per-item limit, SDK domain byte bound), with overflow-safe arithmetic. Physical
+per-item limit, SDK bot byte bound), with overflow-safe arithmetic. Physical
 output allowance is the image count, not HTTP-call count. All photos are
 prepared before the one AllowSplit delivery; text-only remains SingleMessageOnly.
 No new memory/retention configuration or default was introduced. This bounds

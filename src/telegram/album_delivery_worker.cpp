@@ -150,17 +150,17 @@ auto AlbumDeliveryWorker::flush(std::shared_ptr<AlbumDeliveryWorker> self,
       warn_retained("Album failure notification was not accepted; no resubmit");
     co_return;
   }
-  if (!result.domain_delivery)
+  if (!result.bot_delivery)
     co_return;
-  if (result.domain_delivery->newly_completed) {
+  if (result.bot_delivery->newly_completed) {
     // A retired route can refuse publication. Complete stays durable and must
     // never be re-sent to recover a notification.
     const auto published = co_await publish_bridge_delivery(
-        self->publisher_, std::move(token), std::move(*result.domain_delivery));
+        self->publisher_, std::move(token), std::move(*result.bot_delivery));
     if (!published)
       warn_retained(
           "Album completed without notification acceptance; no resubmit");
-  } else if (result.domain_delivery->persisted.state !=
+  } else if (result.bot_delivery->persisted.state !=
              ledger::DeliveryState::Complete) {
     warn_retained(
         "Typed album is incomplete or uncertain; durable delivery retained");

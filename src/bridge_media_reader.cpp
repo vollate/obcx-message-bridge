@@ -9,22 +9,21 @@
 #include <utility>
 
 namespace bridge {
-namespace domain = obcx::bot;
+namespace bot = obcx::bot;
 namespace {
 // Match the existing Telegram upload signature checks, not an implicit decoder
 // or transcoder. Native kind remains authoritative; unknown encodings stay
 // unknown and the destination adapter still validates the complete send.
-auto attachment_encoding(const domain::BytesSource &source,
-                         domain::MediaKind kind) -> std::optional<std::string> {
+auto attachment_encoding(const bot::BytesSource &source, bot::MediaKind kind)
+    -> std::optional<std::string> {
   const std::string_view bytes{
       reinterpret_cast<const char *>(source.bytes.data()), source.bytes.size()};
   const bool audio =
-      kind == domain::MediaKind::Audio || kind == domain::MediaKind::Voice;
+      kind == bot::MediaKind::Audio || kind == bot::MediaKind::Voice;
   if (bytes.size() >= 12 && bytes.substr(4, 4) == "ftyp") {
     if (audio)
       return "audio/mp4";
-    if (kind == domain::MediaKind::Video ||
-        kind == domain::MediaKind::Animation)
+    if (kind == bot::MediaKind::Video || kind == bot::MediaKind::Animation)
       return "video/mp4";
   }
   if (audio) {
@@ -47,26 +46,24 @@ auto attachment_encoding(const domain::BytesSource &source,
 }
 } // namespace
 
-auto read_bridge_attachment(
-    std::shared_ptr<domain::BotOperationGateway> gateway,
-    domain::ReceivedMedia received, std::size_t maximum_bytes)
-    -> boost::asio::awaitable<domain::BytesSource> {
+auto read_bridge_attachment(std::shared_ptr<bot::BotOperationGateway> gateway,
+                            bot::ReceivedMedia received,
+                            std::size_t maximum_bytes)
+    -> boost::asio::awaitable<bot::BytesSource> {
   received.validate();
   if (!gateway || !maximum_bytes ||
-      maximum_bytes > domain::detail::domain_maximum_bytes)
+      maximum_bytes > bot::detail::bot_maximum_bytes)
     throw std::invalid_argument(
         "attachment read requires service and byte budget");
-  if (received.kind == domain::MediaKind::File &&
-      received.metadata.size_bytes &&
+  if (received.kind == bot::MediaKind::File && received.metadata.size_bytes &&
       *received.metadata.size_bytes > maximum_bytes)
     throw BridgeBotOperationFailure(
-        {.code = domain::BotOperationErrorCode::MediaTooLarge,
+        {.code = bot::BotOperationErrorCode::MediaTooLarge,
          .message = "file exceeds bridge byte budget",
          .retryable = false,
-         .submission_safety =
-             domain::SubmissionSafety::DefinitelyNotSubmitted});
-  auto read = co_await domain::BotClient{*gateway}.read_media(
-      domain::ReadMediaRequest{received.media, maximum_bytes});
+         .submission_safety = bot::SubmissionSafety::DefinitelyNotSubmitted});
+  auto read = co_await bot::BotClient{*gateway}.read_media(
+      bot::ReadMediaRequest{received.media, maximum_bytes});
   read.validate();
   if (!read.ok())
     throw BridgeBotOperationFailure(std::move(*read.error));
@@ -79,15 +76,13 @@ auto read_bridge_attachment(
        *blob.identity != *received.identity))
     throw std::runtime_error(
         "attachment read result violates kind, identity or budget");
-  if (received.kind == domain::MediaKind::File &&
-      received.metadata.size_bytes &&
+  if (received.kind == bot::MediaKind::File && received.metadata.size_bytes &&
       *received.metadata.size_bytes != blob.source.bytes.size())
     throw BridgeBotOperationFailure(
-        {.code = domain::BotOperationErrorCode::MalformedResponse,
+        {.code = bot::BotOperationErrorCode::MalformedResponse,
          .message = "file read size differs from received metadata",
          .retryable = false,
-         .submission_safety =
-             domain::SubmissionSafety::DefinitelyNotSubmitted});
+         .submission_safety = bot::SubmissionSafety::DefinitelyNotSubmitted});
   // Preserve available typed metadata without replacing the reader's MIME or
   // copying a reported size into verified bytes. A native MIME is only a hint:
   // the destination adapter still checks the actual supported byte signature.
@@ -109,16 +104,15 @@ auto read_bridge_attachment(
   co_return std::move(blob.source);
 }
 
-auto has_telegram_bridge_prefix(const domain::MessageReceived &message)
-    -> bool {
+auto has_telegram_bridge_prefix(const bot::MessageReceived &message) -> bool {
   constexpr std::string_view marker = "[Telegram] ";
   std::size_t matched = 0;
   for (const auto &block : message.body) {
-    const auto *text = std::get_if<domain::ReceivedRichText>(&block);
+    const auto *text = std::get_if<bot::ReceivedRichText>(&block);
     if (!text)
       return false;
     for (const auto &span : *text) {
-      const auto *literal = std::get_if<domain::Text>(&span);
+      const auto *literal = std::get_if<bot::Text>(&span);
       if (!literal)
         return false;
       const auto count =

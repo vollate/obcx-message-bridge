@@ -1,6 +1,6 @@
 #pragma once
 
-#include <core/bot/domain_events.hpp>
+#include <core/bot/bot_events.hpp>
 
 #include <chrono>
 #include <cstdint>

@@ -9,7 +9,7 @@
 #include "telegram/handler.hpp"
 #include "telegram/media_group_buffer.hpp"
 #include "telegram/ordinary_forwarder.hpp"
-#include <telegram/bot/domain_views.hpp>
+#include <telegram/bot/bot_views.hpp>
 
 #include <common/logger.hpp>
 

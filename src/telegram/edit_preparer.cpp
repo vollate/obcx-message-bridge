@@ -2,15 +2,15 @@
 #include "bridge_hash.hpp"
 #include "bridge_state_repository.hpp"
 #include "telegram/ordinary_forwarder.hpp"
-#include <telegram/bot/domain_views.hpp>
+#include <telegram/bot/bot_views.hpp>
 
 #include <algorithm>
 #include <stdexcept>
 
 namespace bridge::telegram {
 namespace {
-namespace domain = obcx::bot;
-template <class T> auto require(domain::BotOperationResult<T> value) -> T {
+namespace bot = obcx::bot;
+template <class T> auto require(bot::BotOperationResult<T> value) -> T {
   value.validate();
   if (!value.ok())
     throw BridgeBotOperationFailure(std::move(*value.error));
@@ -18,11 +18,11 @@ template <class T> auto require(domain::BotOperationResult<T> value) -> T {
 }
 template <class T>
 auto encode(std::string codec, const T &value) -> ledger::OpaqueValue {
-  const domain::Json json = value;
-  domain::detail::validate_domain_wire(json);
-  auto bytes = domain::Json::to_cbor(json);
-  if (bytes.size() > domain::detail::domain_maximum_bytes)
-    throw domain::detail::DomainBudgetExceeded{};
+  const bot::Json json = value;
+  bot::detail::validate_bot_wire(json);
+  auto bytes = bot::Json::to_cbor(json);
+  if (bytes.size() > bot::detail::bot_maximum_bytes)
+    throw bot::detail::BotBudgetExceeded{};
   const auto version = codec == "bridge.EditIntent.cbor" ? 2 : 1;
   return {std::move(codec), version, {bytes.begin(), bytes.end()}};
 }
@@ -129,10 +129,10 @@ auto OrdinaryForwarder::prepare_edit(
   if (group != member->media_group_ref)
     throw std::runtime_error("edit original album membership changed");
   const auto digest = calculate_hash(
-      domain::Json::array({pair_id_, original->delivery_id,
-                           domain::Json(stored.message.message),
-                           observation->edited_at->unix_milliseconds,
-                           observation->content_fingerprint})
+      bot::Json::array({pair_id_, original->delivery_id,
+                        bot::Json(stored.message.message),
+                        observation->edited_at->unix_milliseconds,
+                        observation->content_fingerprint})
           .dump());
   if (digest.empty())
     throw std::runtime_error("edit revision identity hashing failed");
@@ -210,23 +210,23 @@ auto OrdinaryForwarder::prepare_edit(
   (void)reconcile_revision_mutations(operations, expected_outputs);
 
   const auto route = resolved->route; // Own configuration before suspension.
-  const auto capabilities = require(
-      co_await domain::BotClient{*gateway_}.capabilities({route.target}));
+  const auto capabilities =
+      require(co_await bot::BotClient{*gateway_}.capabilities({route.target}));
   if (capabilities.conversation != route.target)
     throw std::runtime_error("edit capability scope mismatch");
   check_media_capabilities(stored.message, capabilities);
   const auto media_count = static_cast<std::size_t>(
       std::ranges::count_if(stored.message.body, [](const auto &block) {
-        return std::holds_alternative<domain::ReceivedMedia>(block);
+        return std::holds_alternative<bot::ReceivedMedia>(block);
       }));
-  domain::SendLimits limits{1, 0, 0};
+  bot::SendLimits limits{1, 0, 0};
   if (media_count) {
     const auto item = config_->qq_media_download_max_bytes;
-    if (!item || item > domain::detail::domain_maximum_bytes)
+    if (!item || item > bot::detail::bot_maximum_bytes)
       throw std::invalid_argument("invalid configured edit media byte budget");
     limits = {1, item,
-              media_count > domain::detail::domain_maximum_bytes / item
-                  ? domain::detail::domain_maximum_bytes
+              media_count > bot::detail::bot_maximum_bytes / item
+                  ? bot::detail::bot_maximum_bytes
                   : media_count * item};
   }
   auto prepared = co_await prepare_member(
@@ -241,7 +241,7 @@ auto OrdinaryForwarder::prepare_edit(
       pair_id_,
       {std::move(prepared.member)},
       {route.target, std::move(prepared.body), std::move(prepared.reply),
-       domain::DeliveryPolicy::SingleMessageOnly, limits},
+       bot::DeliveryPolicy::SingleMessageOnly, limits},
       std::move(prepared.origins),
       BridgeQuoteAnchor::FirstConfirmed,
       stored.message.received_at.unix_milliseconds,
@@ -257,45 +257,44 @@ auto OrdinaryForwarder::prepare_edit(
   // This is a revision intent, never a second first-submission admission.
   // The immutable journal retains only the current typed
   // observation/publication.
-  auto origins = domain::Json::array();
+  auto origins = bot::Json::array();
   for (const auto &block : request.block_origins) {
     if (!block) {
       origins.push_back(nullptr);
       continue;
     }
-    auto contributions = domain::Json::array();
+    auto contributions = bot::Json::array();
     for (const auto &origin : *block)
       contributions.push_back({{"member_id", origin.member_id},
                                {"input_block", origin.input_block}});
     origins.push_back(std::move(contributions));
   }
-  const domain::Json policy =
+  const bot::Json policy =
       request.retry_policy
-          ? domain::Json{{"base_interval_sec",
-                          request.retry_policy->base_interval_sec},
-                         {"max_interval_sec",
-                          request.retry_policy->max_interval_sec}}
-          : domain::Json(nullptr);
-  auto intent =
-      encode("bridge.EditIntent.cbor",
-             domain::Json{
-                 {"delivery_id", request.delivery_id},
-                 {"revision_id", revision_id},
-                 {"attempt_id", request.attempt_id},
-                 {"pair_id", request.pair_id},
-                 {"member_id", member->member_id},
-                 {"original_message", stored.message},
-                 {"send", request.send},
-                 {"block_origins", std::move(origins)},
-                 {"input_blocks", request.members.front().input_blocks},
-                 {"quote_anchor", static_cast<unsigned>(request.quote_anchor)},
-                 {"received_at_ms", request.admitted_at_ms},
-                 {"max_attempts", request.max_attempts},
-                 {"retry_policy", policy},
-                 {"publication",
-                  {{"event_id", request.publication.event_id},
-                   {"correlation_id", request.publication.correlation_id},
-                   {"source_bot", request.publication.source_bot}}}});
+          ? bot::Json{{"base_interval_sec",
+                       request.retry_policy->base_interval_sec},
+                      {"max_interval_sec",
+                       request.retry_policy->max_interval_sec}}
+          : bot::Json(nullptr);
+  auto intent = encode(
+      "bridge.EditIntent.cbor",
+      bot::Json{{"delivery_id", request.delivery_id},
+                {"revision_id", revision_id},
+                {"attempt_id", request.attempt_id},
+                {"pair_id", request.pair_id},
+                {"member_id", member->member_id},
+                {"original_message", stored.message},
+                {"send", request.send},
+                {"block_origins", std::move(origins)},
+                {"input_blocks", request.members.front().input_blocks},
+                {"quote_anchor", static_cast<unsigned>(request.quote_anchor)},
+                {"received_at_ms", request.admitted_at_ms},
+                {"max_attempts", request.max_attempts},
+                {"retry_policy", policy},
+                {"publication",
+                 {{"event_id", request.publication.event_id},
+                  {"correlation_id", request.publication.correlation_id},
+                  {"source_bot", request.publication.source_bot}}}});
   ledger::RevisionAdmission admission{
       original->delivery_id,
       pair_id_,
@@ -321,10 +320,10 @@ auto OrdinaryForwarder::forward_edit(
   auto preparation = co_await prepare_edit(stored, std::move(publication));
   BridgeForwardResult result;
   if (auto *replay = std::get_if<ledger::RevisionSnapshot>(&preparation)) {
-    result.domain_revision = BridgeRevisionResult{
+    result.bot_revision = BridgeRevisionResult{
         std::move(*replay), {}, std::nullopt, false, false};
   } else if (auto *prepared = std::get_if<PreparedEdit>(&preparation)) {
-    result.domain_revision = co_await send_bridge_revision(
+    result.bot_revision = co_await send_bridge_revision(
         gateway_, repository_, blocking_, std::move(prepared->request),
         std::move(prepared->admission));
   }

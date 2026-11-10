@@ -6,7 +6,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <chrono>
 #include <core/actor/actor_messages.hpp>
-#include <core/bot/domain_events.hpp>
+#include <core/bot/bot_events.hpp>
 #include <functional>
 #include <map>
 #include <memory>

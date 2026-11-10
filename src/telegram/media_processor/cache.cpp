@@ -9,7 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <common/logger.hpp>
-#include <core/bot/domain_codec.hpp>
+#include <core/bot/bot_codec.hpp>
 #include <filesystem>
 #include <fmt/format.h>
 #include <type_traits>
@@ -271,7 +271,7 @@ auto TelegramMediaProcessor::read_cached_media(obcx::bot::ReceivedMedia media,
     -> boost::asio::awaitable<CacheRead> {
   validate_source(media);
   if (!maximum_bytes || maximum_bytes > config_->qq_media_download_max_bytes ||
-      maximum_bytes > obcx::bot::detail::domain_maximum_bytes)
+      maximum_bytes > obcx::bot::detail::bot_maximum_bytes)
     throw std::invalid_argument("invalid Telegram cache byte budget");
   const auto info = obcx::telegram::bot::file_observation_view(media);
   const auto sticker = obcx::telegram::bot::sticker_view(media);

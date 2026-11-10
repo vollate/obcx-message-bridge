@@ -44,11 +44,10 @@ auto decode(const ledger::OpaqueValue &value, std::string_view name)
     -> d::Json {
   if (value.codec != "obcx.bot." + std::string(name) + ".cbor" ||
       value.version != (name == "BridgeDeliveryPolicy" ? 2 : 1) ||
-      value.bytes.empty() ||
-      value.bytes.size() > d::detail::domain_maximum_bytes)
+      value.bytes.empty() || value.bytes.size() > d::detail::bot_maximum_bytes)
     throw std::runtime_error("unsupported retry route evidence");
   auto document = d::Json::from_cbor(value.bytes.begin(), value.bytes.end());
-  d::detail::validate_domain_wire(document);
+  d::detail::validate_bot_wire(document);
   return document;
 }
 auto now_ms() -> std::int64_t {
@@ -128,7 +127,7 @@ BridgeDeliveryRetryWorker::BridgeDeliveryRetryWorker(
   if (!gateway_ || !repository_ || !blocking_ || !references_ || !lifecycle_ ||
       !publisher_ || interval_.count() <= 0 || maximum_per_poll_ <= 0 ||
       maximum_per_poll_ >
-          static_cast<std::int64_t>(d::detail::domain_maximum_items))
+          static_cast<std::int64_t>(d::detail::bot_maximum_items))
     throw std::invalid_argument(
         "retry worker requires explicit owned services and bounds");
   const auto add = [&](const std::string &pair,

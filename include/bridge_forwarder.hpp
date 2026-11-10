@@ -17,8 +17,8 @@ enum class DirectForwardDisposition {
 
 struct BridgeForwardResult {
   // Only complete durable typed evidence may authorize logical publication.
-  std::optional<BridgeDeliveryResult> domain_delivery;
-  std::optional<BridgeRevisionResult> domain_revision;
+  std::optional<BridgeDeliveryResult> bot_delivery;
+  std::optional<BridgeRevisionResult> bot_revision;
   DirectForwardDisposition disposition = DirectForwardDisposition::NotForwarded;
 };
 

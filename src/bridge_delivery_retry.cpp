@@ -16,7 +16,7 @@ namespace d = obcx::bot;
 template <class T>
 auto encode(std::string_view name, const T &value) -> ledger::OpaqueValue {
   const d::Json document = value;
-  d::detail::validate_domain_wire(document);
+  d::detail::validate_bot_wire(document);
   const auto bytes = d::Json::to_cbor(document);
   return {"obcx.bot." + std::string(name) + ".cbor",
           name == "BridgeDeliveryPolicy" ? 2 : 1,
@@ -26,11 +26,10 @@ auto decode(const ledger::OpaqueValue &value, std::string_view name)
     -> d::Json {
   if (value.codec != "obcx.bot." + std::string(name) + ".cbor" ||
       value.version != (name == "BridgeDeliveryPolicy" ? 2 : 1) ||
-      value.bytes.empty() ||
-      value.bytes.size() > d::detail::domain_maximum_bytes)
+      value.bytes.empty() || value.bytes.size() > d::detail::bot_maximum_bytes)
     throw std::invalid_argument("unsupported typed bridge retry encoding");
   auto document = d::Json::from_cbor(value.bytes.begin(), value.bytes.end());
-  d::detail::validate_domain_wire(document);
+  d::detail::validate_bot_wire(document);
   if (encode(name, document) != value)
     throw std::invalid_argument("noncanonical typed bridge retry encoding");
   return document;
@@ -136,8 +135,8 @@ auto restore_delivery_retry(const ledger::DeliverySnapshot &snapshot,
   const auto &payload = *snapshot.retry;
   const auto &admission = *snapshot.admission;
   if (admission.members.empty() ||
-      admission.members.size() > d::detail::domain_maximum_items ||
-      snapshot.attempts.size() > d::detail::domain_maximum_items)
+      admission.members.size() > d::detail::bot_maximum_items ||
+      snapshot.attempts.size() > d::detail::bot_maximum_items)
     throw std::runtime_error("typed retry evidence exceeds bounds");
   if (payload.format_version != ledger::RetryPayload::current_format_version ||
       payload.target_scope != admission.target_scope ||
@@ -203,7 +202,7 @@ auto restore_delivery_retry(const ledger::DeliverySnapshot &snapshot,
       throw std::runtime_error("typed retry source membership changed");
     d::OperationCorrelation{member.member_id}.validate();
     if (member.input_blocks.empty() ||
-        member.input_blocks.size() > d::detail::domain_maximum_items)
+        member.input_blocks.size() > d::detail::bot_maximum_items)
       throw std::runtime_error("typed retry invalid source contribution set");
     for (const auto &input : member.input_blocks) {
       d::OperationCorrelation{input}.validate();

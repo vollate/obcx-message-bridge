@@ -13,11 +13,10 @@ auto decode(const ledger::OpaqueValue &value, std::string_view codec)
     -> d::Json {
   if (value.codec != codec ||
       value.version != (codec == "bridge.EditIntent.cbor" ? 2 : 1) ||
-      value.bytes.empty() ||
-      value.bytes.size() > d::detail::domain_maximum_bytes)
+      value.bytes.empty() || value.bytes.size() > d::detail::bot_maximum_bytes)
     throw std::runtime_error("invalid edit evidence codec");
   auto json = d::Json::from_cbor(value.bytes.begin(), value.bytes.end());
-  d::detail::validate_domain_wire(json);
+  d::detail::validate_bot_wire(json);
   const auto canonical = d::Json::to_cbor(json);
   if (std::string(canonical.begin(), canonical.end()) != value.bytes)
     throw std::runtime_error("noncanonical edit evidence");
@@ -31,10 +30,10 @@ auto evidence(const BridgeRevisionResult &result) -> ledger::OpaqueValue {
                {"replacement",
                 result.outcome ? d::Json(*result.outcome) : d::Json(nullptr)},
                {"interrupted", result.interrupted}};
-  d::detail::validate_domain_wire(json);
+  d::detail::validate_bot_wire(json);
   const auto bytes = d::Json::to_cbor(json);
-  if (bytes.size() > d::detail::domain_maximum_bytes)
-    throw d::detail::DomainBudgetExceeded{};
+  if (bytes.size() > d::detail::bot_maximum_bytes)
+    throw d::detail::BotBudgetExceeded{};
   return {"bridge.EditOutcomes.cbor", 1, {bytes.begin(), bytes.end()}};
 }
 } // namespace
@@ -156,7 +155,7 @@ auto send_bridge_revision(
   if (request.max_attempts <= 0 ||
       (request.max_attempts > 1 && !request.retry_policy) ||
       request.quote_anchor != BridgeQuoteAnchor::FirstConfirmed ||
-      admission.expected_outputs.size() > d::detail::domain_maximum_items)
+      admission.expected_outputs.size() > d::detail::bot_maximum_items)
     throw std::invalid_argument(
         "invalid explicit edit policy or output budget");
   if (request.retry_policy)

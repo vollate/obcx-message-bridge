@@ -11,6 +11,7 @@
 #include <onebot11/bot/presentation_observation.hpp>
 #include <onebot11/bot/special_content.hpp>
 #include <onebot11/bot/user_target.hpp>
+#include <set>
 
 #include <algorithm>
 #include <chrono>
@@ -18,7 +19,7 @@
 
 namespace bridge::qq {
 namespace {
-namespace domain = obcx::bot;
+namespace bot = obcx::bot;
 
 auto card_category(obcx::onebot11::bot::CardKind kind) -> std::string_view {
   using obcx::onebot11::bot::CardKind;
@@ -51,7 +52,7 @@ auto render_presentation(
   view.validate();
   std::string result;
   const auto append = [&](std::string_view text) {
-    if (text.size() > domain::detail::domain_maximum_bytes - result.size())
+    if (text.size() > bot::detail::bot_maximum_bytes - result.size())
       throw std::runtime_error("QQ presentation exceeds text budget");
     result.append(text);
   };
@@ -89,7 +90,7 @@ auto render_presentation(
   return result;
 }
 
-template <class T> auto require(domain::BotOperationResult<T> result) -> T {
+template <class T> auto require(bot::BotOperationResult<T> result) -> T {
   result.validate();
   if (!result.ok())
     throw std::runtime_error(
@@ -97,8 +98,8 @@ template <class T> auto require(domain::BotOperationResult<T> result) -> T {
   return std::move(*result.value);
 }
 auto same_scope(const ledger::OpaqueValue &encoded,
-                const domain::ConversationRef &scope) -> bool {
-  const auto bytes = domain::Json::to_cbor(domain::Json(scope));
+                const bot::ConversationRef &scope) -> bool {
+  const auto bytes = bot::Json::to_cbor(bot::Json(scope));
   return encoded.codec == "obcx.bot.ConversationRef.cbor" &&
          encoded.version == 1 &&
          encoded.bytes == std::string(bytes.begin(), bytes.end());
@@ -120,8 +121,8 @@ auto unknown_sender_label(
 } // namespace
 
 TextForwarder::TextForwarder(
-    std::shared_ptr<domain::BotOperationGateway> gateway,
-    std::shared_ptr<const domain::ConversationResolver> references,
+    std::shared_ptr<bot::BotOperationGateway> gateway,
+    std::shared_ptr<const bot::ConversationResolver> references,
     std::shared_ptr<BridgeStateRepository> repository,
     std::shared_ptr<obcx::core::BlockingExecutor> blocking,
     const BridgeInstallationPair &pair, std::int64_t max_attempts,
@@ -134,10 +135,10 @@ TextForwarder::TextForwarder(
       max_attempts <= 0)
     throw std::invalid_argument(
         "QQ text forwarding requires owned services and budget");
-  const domain::BotInstallationRef qq{pair.onebot11_installation,
-                                      domain::SurfaceId{"onebot11.qq"}};
-  const domain::BotInstallationRef tg{pair.telegram_installation,
-                                      domain::SurfaceId{"telegram.bot_api"}};
+  const bot::BotInstallationRef qq{pair.onebot11_installation,
+                                   bot::SurfaceId{"onebot11.qq"}};
+  const bot::BotInstallationRef tg{pair.telegram_installation,
+                                   bot::SurfaceId{"telegram.bot_api"}};
   const auto add = [&](const std::string &source, const std::string &target,
                        std::optional<std::string> topic, bool show_sender) {
     auto from = require(
@@ -165,23 +166,23 @@ TextForwarder::TextForwarder(
   }
 }
 
-auto TextForwarder::accepts(const domain::MessageReceived &source) -> bool {
+auto TextForwarder::accepts(const bot::MessageReceived &source) -> bool {
   // Empty/reply-only bodies may still produce the configured sender prefix;
   // otherwise forward() returns no output without submitting an empty message.
-  if (std::holds_alternative<domain::ConversationSender>(source.sender) ||
+  if (std::holds_alternative<bot::ConversationSender>(source.sender) ||
       source.media_group)
     return false;
   const auto supported_text = [](const auto &text) {
     return std::ranges::none_of(text, [](const auto &span) {
-      return std::holds_alternative<domain::UnresolvedMention>(span);
+      return std::holds_alternative<bot::UnresolvedMention>(span);
     });
   };
   return std::ranges::all_of(source.body, [&](const auto &block) {
-    if (const auto *text = std::get_if<domain::ReceivedRichText>(&block))
+    if (const auto *text = std::get_if<bot::ReceivedRichText>(&block))
       return supported_text(*text);
-    if (const auto *media = std::get_if<domain::ReceivedMedia>(&block))
+    if (const auto *media = std::get_if<bot::ReceivedMedia>(&block))
       return supported_text(media->caption);
-    const auto &unsupported = std::get<domain::UnsupportedContent>(block);
+    const auto &unsupported = std::get<bot::UnsupportedContent>(block);
     return unsupported.category == "onebot11.image" ||
            unsupported.category == "onebot11.forward" ||
            unsupported.category == "onebot11.face" ||
@@ -192,7 +193,7 @@ auto TextForwarder::accepts(const domain::MessageReceived &source) -> bool {
   });
 }
 
-auto TextForwarder::display_name(domain::UserRef user, Route route)
+auto TextForwarder::display_name(bot::UserRef user, Route route)
     -> boost::asio::awaitable<std::optional<std::string>> {
   const auto id =
       std::to_string(obcx::onebot11::bot::user_identity_view(user).user_id);
@@ -205,11 +206,11 @@ auto TextForwarder::display_name(domain::UserRef user, Route route)
   // the predecessor's optional-presence policy and do not query/overwrite it.
   if (cached)
     co_return *cached;
-  auto member = co_await domain::BotClient{*gateway_}.get_member(
-      domain::GetMemberRequest{route.source, user});
+  auto member = co_await bot::BotClient{*gateway_}.get_member(
+      bot::GetMemberRequest{route.source, user});
   member.validate();
   if (!member.ok()) {
-    if (member.error->code == domain::BotOperationErrorCode::Cancelled)
+    if (member.error->code == bot::BotOperationErrorCode::Cancelled)
       throw BridgeBotOperationFailure(std::move(*member.error));
     co_return std::nullopt;
   }
@@ -233,22 +234,22 @@ auto TextForwarder::display_name(domain::UserRef user, Route route)
   co_return name;
 }
 
-auto TextForwarder::render_text(domain::ReceivedRichText text, Route route)
-    -> boost::asio::awaitable<domain::RichText> {
-  domain::RichText result;
+auto TextForwarder::render_text(bot::ReceivedRichText text, Route route)
+    -> boost::asio::awaitable<bot::RichText> {
+  bot::RichText result;
   for (const auto &span : text) {
-    if (const auto *literal = std::get_if<domain::Text>(&span)) {
+    if (const auto *literal = std::get_if<bot::Text>(&span)) {
       if (!literal->content.empty())
         result.emplace_back(*literal);
     } else if (route.show_sender) {
-      if (const auto *mention = std::get_if<domain::Mention>(&span)) {
+      if (const auto *mention = std::get_if<bot::Mention>(&span)) {
         const auto id = std::to_string(
             obcx::onebot11::bot::user_identity_view(mention->user).user_id);
         const auto name = co_await display_name(mention->user, route);
         result.emplace_back(
-            domain::Text{name ? "@" + *name + " " : "[@" + id + "] ", {}});
-      } else if (std::holds_alternative<domain::MentionEveryone>(span)) {
-        result.emplace_back(domain::Text{"[@all] ", {}});
+            bot::Text{name ? "@" + *name + " " : "[@" + id + "] ", {}});
+      } else if (std::holds_alternative<bot::MentionEveryone>(span)) {
+        result.emplace_back(bot::Text{"[@all] ", {}});
       }
     }
   }
@@ -276,13 +277,13 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
     throw std::invalid_argument("QQ text forwarding archival scope mismatch");
   std::optional<std::string> unknown_display_id;
   if (route.show_sender &&
-      std::holds_alternative<domain::UnknownSender>(stored.message.sender))
+      std::holds_alternative<bot::UnknownSender>(stored.message.sender))
     unknown_display_id = "Unknown";
-  const auto key = domain::Json::array(
-                       {pair_id_, stored.source.source_platform,
+  const auto key =
+      bot::Json::array({pair_id_, stored.source.source_platform,
                         stored.source.source_bot, stored.source.conversation_id,
-                        stored.source.message_id, domain::Json(route.target)})
-                       .dump();
+                        stored.source.message_id, bot::Json(route.target)})
+          .dump();
   const auto digest = calculate_hash(key);
   if (digest.empty())
     throw std::runtime_error("bridge delivery identity hashing failed");
@@ -299,8 +300,7 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
     co_return result;
   if (existing) {
     const auto &admission = existing->admission;
-    const auto encoded =
-        domain::Json::to_cbor(domain::Json(stored.message.message));
+    const auto encoded = bot::Json::to_cbor(bot::Json(stored.message.message));
     if (!admission || admission->pair_id != pair_id_ ||
         !same_scope(admission->source_scope, route.source) ||
         !same_scope(admission->target_scope, route.target) ||
@@ -310,7 +310,7 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
                                 std::string(encoded.begin(), encoded.end())})
       throw std::runtime_error(
           "bridge delivery identity collision or corrupt scope");
-    result.domain_delivery =
+    result.bot_delivery =
         BridgeDeliveryResult{std::move(*existing), std::nullopt, false};
     co_return result; // No member lookup, send or new success on replay.
   }
@@ -318,16 +318,17 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
   std::map<std::size_t, obcx::onebot11::bot::QqForwardRef> forwards;
   const bool has_forward =
       std::ranges::any_of(stored.message.body, [](const auto &block) {
-        const auto *unsupported =
-            std::get_if<domain::UnsupportedContent>(&block);
+        const auto *unsupported = std::get_if<bot::UnsupportedContent>(&block);
         return unsupported && unsupported->category == "onebot11.forward";
       });
   std::map<std::size_t, std::string> display_literals;
+  // Market faces without a readable image are dropped, never sent as text.
+  std::set<std::size_t> omitted_market_faces;
   bool has_special_display = false;
   bool has_presentation = false;
   for (std::size_t index = 0; index < stored.message.body.size(); ++index) {
-    if (const auto *unsupported = std::get_if<domain::UnsupportedContent>(
-            &stored.message.body[index])) {
+    if (const auto *unsupported =
+            std::get_if<bot::UnsupportedContent>(&stored.message.body[index])) {
       has_presentation =
           has_presentation || is_presentation_category(unsupported->category);
       has_special_display = has_special_display ||
@@ -351,7 +352,7 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
         throw std::runtime_error("QQ presentation source or position mismatch");
       previous_native = view.native_segment_index;
       const auto *unsupported =
-          std::get_if<domain::UnsupportedContent>(&stored.message.body[index]);
+          std::get_if<bot::UnsupportedContent>(&stored.message.body[index]);
       const auto expected =
           std::holds_alternative<obcx::onebot11::bot::MusicObservation>(
               view.value)
@@ -363,7 +364,7 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
     }
     for (std::size_t i = 0; i < stored.message.body.size(); ++i) {
       const auto *unsupported =
-          std::get_if<domain::UnsupportedContent>(&stored.message.body[i]);
+          std::get_if<bot::UnsupportedContent>(&stored.message.body[i]);
       if (unsupported && is_presentation_category(unsupported->category) &&
           !display_literals.contains(i))
         throw std::runtime_error("QQ presentation lacks original observation");
@@ -380,8 +381,8 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
             forward->source != view.source ||
             index >= stored.message.body.size())
           throw std::runtime_error("forward view source mismatch");
-        const auto *unsupported = std::get_if<domain::UnsupportedContent>(
-            &stored.message.body[index]);
+        const auto *unsupported =
+            std::get_if<bot::UnsupportedContent>(&stored.message.body[index]);
         if (!unsupported || unsupported->category != "onebot11.forward" ||
             !forwards.emplace(index, *forward).second)
           throw std::runtime_error("forward view projection mismatch");
@@ -392,8 +393,8 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
         if (view.source != stored.message.message ||
             index >= stored.message.body.size())
           throw std::runtime_error("face view source mismatch");
-        const auto *unsupported = std::get_if<domain::UnsupportedContent>(
-            &stored.message.body[index]);
+        const auto *unsupported =
+            std::get_if<bot::UnsupportedContent>(&stored.message.body[index]);
         if (!unsupported || unsupported->category != "onebot11.face" ||
             !display_literals.emplace(index, "[QQ表情:" + face->id + "]")
                  .second)
@@ -407,17 +408,13 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
             index >= stored.message.body.size())
           throw std::runtime_error("market face view source mismatch");
         if (const auto *media =
-                std::get_if<domain::ReceivedMedia>(&stored.message.body[index]);
+                std::get_if<bot::ReceivedMedia>(&stored.message.body[index]);
             media && obcx::onebot11::bot::market_face_view(*media))
           continue; // Original live ref, not the restored view, owns the read.
-        const auto *unsupported = std::get_if<domain::UnsupportedContent>(
-            &stored.message.body[index]);
+        const auto *unsupported =
+            std::get_if<bot::UnsupportedContent>(&stored.message.body[index]);
         if (!unsupported || unsupported->category != "onebot11.mface" ||
-            !display_literals
-                 .emplace(index, face->description
-                                     ? "[表情包:" + *face->description + "]"
-                                     : "[QQ超级表情]")
-                 .second)
+            !omitted_market_faces.insert(index).second)
           throw std::runtime_error("market face view projection mismatch");
       } else if (const auto *card =
                      std::get_if<obcx::onebot11::bot::RawCardView>(
@@ -427,8 +424,8 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
         if (view.source != stored.message.message ||
             index >= stored.message.body.size())
           throw std::runtime_error("card view source mismatch");
-        const auto *unsupported = std::get_if<domain::UnsupportedContent>(
-            &stored.message.body[index]);
+        const auto *unsupported =
+            std::get_if<bot::UnsupportedContent>(&stored.message.body[index]);
         if (!unsupported ||
             unsupported->category != card_category(card->kind) ||
             display_literals.contains(index))
@@ -438,39 +435,41 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
     }
     for (std::size_t i = 0; i < stored.message.body.size(); ++i) {
       const auto *unsupported =
-          std::get_if<domain::UnsupportedContent>(&stored.message.body[i]);
+          std::get_if<bot::UnsupportedContent>(&stored.message.body[i]);
       if (unsupported && unsupported->category == "onebot11.forward" &&
           !forwards.contains(i))
         throw std::runtime_error(
             "forward content lacks a typed resource reference");
-      if (unsupported &&
-          (unsupported->category == "onebot11.face" ||
-           unsupported->category == "onebot11.mface") &&
-          !display_literals.contains(i))
+      if (unsupported && ((unsupported->category == "onebot11.face" &&
+                           !display_literals.contains(i)) ||
+                          (unsupported->category == "onebot11.mface" &&
+                           !omitted_market_faces.contains(i))))
         throw std::runtime_error("face content lacks a typed view");
       if (unsupported && is_card_category(unsupported->category) &&
           !display_literals.contains(i))
         throw std::runtime_error("card content lacks original metadata");
     }
   }
+  if (!omitted_market_faces.empty() &&
+      omitted_market_faces.size() == stored.message.body.size())
+    co_return result;
   std::vector<PhotoInput> photo_refs;
   std::vector<std::size_t> photo_indices;
   std::size_t media_count = 0;
   bool has_market_face = false;
   for (std::size_t i = 0; i < stored.message.body.size(); ++i) {
     if (const auto *media =
-            std::get_if<domain::ReceivedMedia>(&stored.message.body[i])) {
+            std::get_if<bot::ReceivedMedia>(&stored.message.body[i])) {
       ++media_count;
       has_market_face =
           has_market_face ||
           obcx::onebot11::bot::market_face_view(*media).has_value();
-      if (media->kind == domain::MediaKind::Image) {
+      if (media->kind == bot::MediaKind::Image) {
         photo_refs.push_back(media->media);
         photo_indices.push_back(i);
       }
-    } else if (const auto *unsupported =
-                   std::get_if<domain::UnsupportedContent>(
-                       &stored.message.body[i]);
+    } else if (const auto *unsupported = std::get_if<bot::UnsupportedContent>(
+                   &stored.message.body[i]);
                unsupported && unsupported->category == "onebot11.image") {
       ++media_count;
       photo_refs.emplace_back(std::nullopt);
@@ -482,18 +481,17 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
   // image-family observation itself does not assert an animation encoding.
   const bool mixed_media =
       has_forward || has_market_face || media_count != photo_refs.size();
-  domain::SendLimits limits{1, 0, 0};
+  bot::SendLimits limits{1, 0, 0};
   std::vector<PreparedPhoto> photos;
   if (media_count || has_forward) {
     const auto per_item = config_->qq_media_download_max_bytes;
-    if (per_item == 0 || per_item > domain::detail::domain_maximum_bytes)
+    if (per_item == 0 || per_item > bot::detail::bot_maximum_bytes)
       throw std::invalid_argument("invalid configured attachment read budget");
     const auto total =
-        has_forward ||
-                media_count > domain::detail::domain_maximum_bytes / per_item
-            ? domain::detail::domain_maximum_bytes
+        has_forward || media_count > bot::detail::bot_maximum_bytes / per_item
+            ? bot::detail::bot_maximum_bytes
             : media_count * per_item;
-    limits = {has_forward   ? domain::detail::domain_maximum_items
+    limits = {has_forward   ? bot::detail::bot_maximum_items
               : mixed_media ? stored.message.body.size()
                             : media_count,
               per_item, total};
@@ -504,7 +502,7 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
                                        std::move(photo_refs), limits);
     }
   }
-  domain::RichText body;
+  bot::RichText body;
   std::vector<std::string> inputs;
   std::vector<ledger::Provenance> origins;
   const auto contribute = [&](std::string block, bool text_contribution) {
@@ -515,7 +513,7 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
   if (route.show_sender) {
     std::string label;
     if (const auto *known =
-            std::get_if<domain::KnownUser>(&stored.message.sender)) {
+            std::get_if<bot::KnownUser>(&stored.message.sender)) {
       const auto user = known->user;
       auto name = co_await display_name(user, route);
       label = name.value_or(std::to_string(
@@ -530,15 +528,14 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
           repository_, blocking_, route.source.installation.installation_id,
           display_id, route.source_group);
     }
-    body.emplace_back(
-        domain::Text{"[" + label + "]", {domain::TextStyle::Italic}});
+    body.emplace_back(bot::Text{"[" + label + "]", {bot::TextStyle::Italic}});
     if (mixed_media || photos.size() <= 1)
-      body.emplace_back(domain::Text{"\t", {}});
+      body.emplace_back(bot::Text{"\t", {}});
     contribute("sender", true);
   }
-  domain::MessageBody outgoing;
+  bot::MessageBody outgoing;
   std::vector<std::optional<std::vector<ledger::Provenance>>> block_origins;
-  std::optional<domain::MessageRef> reply;
+  std::optional<bot::MessageRef> reply;
   bool reply_resolved = false;
   if (mixed_media) {
     // Mixed attachments retain source order: never gather images across a
@@ -549,8 +546,10 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
     for (std::size_t index = 0; index < stored.message.body.size(); ++index) {
       const auto key = "body:" + std::to_string(index);
       inputs.push_back(key);
+      if (omitted_market_faces.contains(index))
+        continue;
       std::vector<ledger::Provenance> contribution{{"source", key}};
-      const auto prefix = [&](domain::RichText &text) {
+      const auto prefix = [&](bot::RichText &text) {
         if (!body.empty()) {
           text.insert(text.begin(), body.begin(), body.end());
           body.clear();
@@ -559,12 +558,11 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
         }
       };
       const auto *text =
-          std::get_if<domain::ReceivedRichText>(&stored.message.body[index]);
+          std::get_if<bot::ReceivedRichText>(&stored.message.body[index]);
       const auto literal = display_literals.find(index);
       if (text || literal != display_literals.end()) {
-        auto rendered =
-            text ? co_await render_text(*text, route)
-                 : domain::RichText{domain::Text{literal->second, {}}};
+        auto rendered = text ? co_await render_text(*text, route)
+                             : bot::RichText{bot::Text{literal->second, {}}};
         prefix(rendered);
         if (rendered.empty())
           continue;
@@ -576,19 +574,19 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
         const auto remaining = limits.maximum_media_total_bytes - bytes;
         auto expanded = co_await prepare_forward(
             gateway_, blocking_, config_, found->second,
-            domain::SendLimits{
+            bot::SendLimits{
                 limits.maximum_messages - outgoing.size(),
                 std::min(limits.maximum_media_item_bytes, remaining),
                 remaining});
-        prefix(std::get<domain::RichText>(expanded.front()));
+        prefix(std::get<bot::RichText>(expanded.front()));
         for (auto &block : expanded) {
           std::visit(
               [&](const auto &value) {
                 if constexpr (!std::same_as<
                                   std::remove_cvref_t<decltype(value)>,
-                                  domain::RichText>)
+                                  bot::RichText>)
                   bytes +=
-                      std::get<domain::BytesSource>(value.source).bytes.size();
+                      std::get<bot::BytesSource>(value.source).bytes.size();
               },
               block);
           outgoing.push_back(std::move(block));
@@ -597,19 +595,27 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
         continue;
       } else {
         const auto *observed_media =
-            std::get_if<domain::ReceivedMedia>(&stored.message.body[index]);
+            std::get_if<bot::ReceivedMedia>(&stored.message.body[index]);
         const bool missing_image = observed_media == nullptr;
-        auto caption =
-            observed_media
-                ? co_await render_text(observed_media->caption, route)
-                : domain::RichText{};
+        // A market face's caption is its QQ summary such as "[xxx]", not
+        // text the sender wrote; the sticker image alone represents it.
+        const bool market_face =
+            observed_media &&
+            obcx::onebot11::bot::market_face_view(*observed_media).has_value();
+        if (market_face && photos.at(photo_index).replaced()) {
+          ++photo_index;
+          continue; // Never stand in a placeholder image for a sticker.
+        }
+        bot::RichText caption;
+        if (observed_media && !market_face)
+          caption = co_await render_text(observed_media->caption, route);
         prefix(caption);
         const auto append_line = [&](std::string text) {
           if (!caption.empty())
-            caption.emplace_back(domain::Text{"\n", {}});
-          caption.emplace_back(domain::Text{std::move(text), {}});
+            caption.emplace_back(bot::Text{"\n", {}});
+          caption.emplace_back(bot::Text{std::move(text), {}});
         };
-        if (missing_image || observed_media->kind == domain::MediaKind::Image) {
+        if (missing_image || observed_media->kind == bot::MediaKind::Image) {
           auto &photo = photos.at(photo_index++);
           if (photo.status == PhotoPreparationStatus::Adjusted)
             append_line("ℹ️ 1 张图片尺寸已自动调整");
@@ -617,16 +623,16 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
             append_line("⚠️ 1 张图片暂时无法获取，已用占位图替换");
           if (photo.status == PhotoPreparationStatus::UnsupportedFormat)
             append_line("ℹ️ 1 张图片无法确认为受支持的静态格式");
-          if (photo.kind == domain::MediaKind::Animation)
+          if (photo.kind == bot::MediaKind::Animation)
             outgoing.emplace_back(
-                domain::Animation{std::move(photo.source), std::move(caption)});
+                bot::Animation{std::move(photo.source), std::move(caption)});
           else
             outgoing.emplace_back(
-                domain::Image{std::move(photo.source), std::move(caption)});
+                bot::Image{std::move(photo.source), std::move(caption)});
         } else {
           const auto &media = *observed_media;
-          std::optional<domain::BytesSource> source;
-          std::optional<domain::BotOperationError> unavailable;
+          std::optional<bot::BytesSource> source;
+          std::optional<bot::BotOperationError> unavailable;
           const auto remaining = limits.maximum_media_total_bytes - bytes;
           if (!remaining)
             throw std::runtime_error("attachment total byte budget exhausted");
@@ -637,9 +643,8 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
           } catch (const BridgeBotOperationFailure &failure) {
             // File read failure has always had a visible text representation.
             // It is chosen before any send, never after possible submission.
-            if (media.kind != domain::MediaKind::File ||
-                failure.error().code ==
-                    domain::BotOperationErrorCode::Cancelled)
+            if (media.kind != bot::MediaKind::File ||
+                failure.error().code == bot::BotOperationErrorCode::Cancelled)
               throw;
             unavailable = failure.error();
           }
@@ -652,35 +657,34 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
                         " bytes)]\n❌ 无法读取文件");
             outgoing.emplace_back(std::move(caption));
           } else {
-            if (media.kind == domain::MediaKind::Voice)
+            if (media.kind == bot::MediaKind::Voice)
               source = co_await prepare_voice(
                   blocking_, config_, std::move(*source),
                   std::min(limits.maximum_media_item_bytes, remaining));
             bytes += source->bytes.size();
             switch (media.kind) {
-            case domain::MediaKind::Video:
+            case bot::MediaKind::Video:
               outgoing.emplace_back(
-                  domain::Video{std::move(*source), std::move(caption)});
+                  bot::Video{std::move(*source), std::move(caption)});
               break;
-            case domain::MediaKind::Animation:
+            case bot::MediaKind::Animation:
               outgoing.emplace_back(
-                  domain::Animation{std::move(*source), std::move(caption)});
+                  bot::Animation{std::move(*source), std::move(caption)});
               break;
-            case domain::MediaKind::Audio:
-            case domain::MediaKind::Voice:
-              outgoing.emplace_back(
-                  domain::Audio{std::move(*source),
-                                media.kind == domain::MediaKind::Voice
-                                    ? domain::AudioKind::Voice
-                                    : domain::AudioKind::Audio,
-                                std::move(caption)});
+            case bot::MediaKind::Audio:
+            case bot::MediaKind::Voice:
+              outgoing.emplace_back(bot::Audio{
+                  std::move(*source),
+                  media.kind == bot::MediaKind::Voice ? bot::AudioKind::Voice
+                                                      : bot::AudioKind::Audio,
+                  std::move(caption)});
               break;
-            case domain::MediaKind::File: {
+            case bot::MediaKind::File: {
               if (!source->metadata.filename)
                 throw std::runtime_error(
                     "received file lacks a display filename");
               auto filename = *source->metadata.filename;
-              outgoing.emplace_back(domain::File{
+              outgoing.emplace_back(bot::File{
                   std::move(*source), std::move(filename), std::move(caption)});
               break;
             }
@@ -696,17 +700,16 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
   } else {
     for (std::size_t index = 0; index < stored.message.body.size(); ++index) {
       const auto *text =
-          std::get_if<domain::ReceivedRichText>(&stored.message.body[index]);
+          std::get_if<bot::ReceivedRichText>(&stored.message.body[index]);
       const auto literal = display_literals.find(index);
       contribute("body:" + std::to_string(index),
                  text != nullptr || literal != display_literals.end());
       if (!text && literal == display_literals.end())
         continue;
-      auto rendered = text
-                          ? co_await render_text(*text, route)
-                          : domain::RichText{domain::Text{literal->second, {}}};
+      auto rendered = text ? co_await render_text(*text, route)
+                           : bot::RichText{bot::Text{literal->second, {}}};
       if (photos.size() > 1 && !body.empty() && !rendered.empty())
-        body.emplace_back(domain::Text{"\n", {}});
+        body.emplace_back(bot::Text{"\n", {}});
       for (auto &span : rendered)
         body.push_back(std::move(span));
     }
@@ -732,11 +735,11 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
       std::vector<std::size_t> batch_sizes;
       for (std::size_t start = 0; start < photos.size();) {
         std::size_t count = 1;
-        if (photos[start].kind == domain::MediaKind::Image &&
+        if (photos[start].kind == bot::MediaKind::Image &&
             !(start == 0 && reply)) {
           std::size_t run = 0;
           while (start + run < photos.size() &&
-                 photos[start + run].kind == domain::MediaKind::Image)
+                 photos[start + run].kind == bot::MediaKind::Image)
             ++run;
           count = std::min<std::size_t>(10, run);
           if (run > 10 && run - count == 1)
@@ -752,9 +755,9 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
       for (const auto &photo : photos)
         known_bytes += photo.source.bytes.size();
       for (const auto &span : body) {
-        if (const auto *literal = std::get_if<domain::Text>(&span)) {
+        if (const auto *literal = std::get_if<bot::Text>(&span)) {
           if (literal->content.size() >
-              (domain::detail::domain_maximum_bytes - known_bytes) / batches)
+              (bot::detail::bot_maximum_bytes - known_bytes) / batches)
             throw std::runtime_error(
                 "repeated photo caption exceeds SDK wire budget");
           known_bytes += literal->content.size() * batches;
@@ -774,19 +777,19 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
         for (std::size_t i = start; i < start + count; ++i) {
           const auto input = photo_indices[i];
           const auto *media =
-              std::get_if<domain::ReceivedMedia>(&stored.message.body[input]);
+              std::get_if<bot::ReceivedMedia>(&stored.message.body[input]);
           auto caption = media ? co_await render_text(media->caption, route)
-                               : domain::RichText{};
+                               : bot::RichText{};
           std::vector<ledger::Provenance> contribution{
               {"source", "body:" + std::to_string(input)}};
           const auto append_line = [&](std::string text) {
             if (!caption.empty())
-              caption.emplace_back(domain::Text{"\n", {}});
-            caption.emplace_back(domain::Text{std::move(text), {}});
+              caption.emplace_back(bot::Text{"\n", {}});
+            caption.emplace_back(bot::Text{std::move(text), {}});
           };
           if (i == start) {
             if (!caption.empty() && !body.empty())
-              caption.emplace_back(domain::Text{"\n", {}});
+              caption.emplace_back(bot::Text{"\n", {}});
             caption.insert(caption.end(), body.begin(), body.end());
             contribution.insert(contribution.end(), origins.begin(),
                                 origins.end());
@@ -804,12 +807,12 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
                 contribution.push_back(
                     {"source", "body:" + std::to_string(photo_indices[j])});
           }
-          if (photos[i].kind == domain::MediaKind::Animation)
-            outgoing.emplace_back(domain::Animation{std::move(photos[i].source),
-                                                    std::move(caption)});
+          if (photos[i].kind == bot::MediaKind::Animation)
+            outgoing.emplace_back(bot::Animation{std::move(photos[i].source),
+                                                 std::move(caption)});
           else
             outgoing.emplace_back(
-                domain::Image{std::move(photos[i].source), std::move(caption)});
+                bot::Image{std::move(photos[i].source), std::move(caption)});
           block_origins.emplace_back(std::move(contribution));
         }
         start += count;
@@ -818,7 +821,7 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
   }
   if (outgoing.empty())
     co_return result;
-  if (outgoing.size() > domain::detail::domain_maximum_items)
+  if (outgoing.size() > bot::detail::bot_maximum_items)
     throw std::runtime_error("prepared body exceeds output budget");
   // The expansion ceiling is not a submission allowance: admit only the
   // number of actually prepared blocks. Long text/captions are not truncated.
@@ -838,9 +841,8 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
       {{"source", stored.message.message, stored.message, std::nullopt,
         std::move(inputs)}},
       {route.target, std::move(outgoing), std::move(reply),
-       media_count == 0 && !has_forward
-           ? domain::DeliveryPolicy::SingleMessageOnly
-           : domain::DeliveryPolicy::AllowSplit,
+       media_count == 0 && !has_forward ? bot::DeliveryPolicy::SingleMessageOnly
+                                        : bot::DeliveryPolicy::AllowSplit,
        limits},
       std::move(block_origins),
       BridgeQuoteAnchor::FirstConfirmed,
@@ -852,7 +854,7 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
                               config_->max_retry_interval_sec}}
                         : std::nullopt,
       std::move(publication)};
-  result.domain_delivery = co_await send_bridge_delivery(
+  result.bot_delivery = co_await send_bridge_delivery(
       gateway_, repository_, blocking_, references_, std::move(request));
   co_return result;
 }

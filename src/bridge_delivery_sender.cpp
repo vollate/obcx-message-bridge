@@ -21,28 +21,28 @@
 
 namespace bridge {
 namespace {
-namespace domain = obcx::bot;
+namespace bot = obcx::bot;
 constexpr std::string_view correlation_prefix = "bridge-delivery-v1:";
 constexpr std::string_view revision_correlation_prefix = "bridge-edit-v1:";
 
 template <class T>
 auto encode(std::string_view type, const T &value) -> ledger::OpaqueValue {
-  const domain::Json document = value;
-  domain::detail::validate_domain_wire(document);
-  const auto bytes = domain::Json::to_cbor(document);
+  const bot::Json document = value;
+  bot::detail::validate_bot_wire(document);
+  const auto bytes = bot::Json::to_cbor(document);
   return {"obcx.bot." + std::string(type) + ".cbor",
           type == "BridgeDeliveryPolicy" ? 2 : 1,
           std::string(bytes.begin(), bytes.end())};
 }
-auto decode_message(const ledger::OpaqueValue &value) -> domain::MessageRef {
+auto decode_message(const ledger::OpaqueValue &value) -> bot::MessageRef {
   if (value.codec != "obcx.bot.MessageRef.cbor" || value.version != 1 ||
       value.bytes.empty() ||
-      value.bytes.size() > domain::detail::domain_maximum_bytes)
+      value.bytes.size() > bot::detail::bot_maximum_bytes)
     throw std::runtime_error("unsupported bridge message reference evidence");
   const auto document =
-      domain::Json::from_cbor(value.bytes.begin(), value.bytes.end());
-  domain::detail::validate_domain_wire(document);
-  return document.get<domain::MessageRef>();
+      bot::Json::from_cbor(value.bytes.begin(), value.bytes.end());
+  bot::detail::validate_bot_wire(document);
+  return document.get<bot::MessageRef>();
 }
 auto now_ms() -> std::int64_t {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -50,23 +50,23 @@ auto now_ms() -> std::int64_t {
       .count();
 }
 auto correlation(const BridgeDeliveryRequest &request)
-    -> domain::OperationCorrelation {
-  domain::OperationCorrelation{request.delivery_id}.validate();
-  domain::OperationCorrelation{request.attempt_id}.validate();
-  domain::OperationCorrelation result{
+    -> bot::OperationCorrelation {
+  bot::OperationCorrelation{request.delivery_id}.validate();
+  bot::OperationCorrelation{request.attempt_id}.validate();
+  bot::OperationCorrelation result{
       std::string(correlation_prefix) +
-      domain::Json::array({request.delivery_id, request.attempt_id}).dump()};
+      bot::Json::array({request.delivery_id, request.attempt_id}).dump()};
   result.validate();
   return result;
 }
 auto admission_for(const BridgeDeliveryRequest &request,
-                   const domain::ConversationResolver &references)
+                   const bot::ConversationResolver &references)
     -> ledger::Admission {
   request.send.validate();
   (void)correlation(request);
-  domain::OperationCorrelation{request.pair_id}.validate();
+  bot::OperationCorrelation{request.pair_id}.validate();
   if (request.members.empty() ||
-      request.members.size() > domain::detail::domain_maximum_items ||
+      request.members.size() > bot::detail::bot_maximum_items ||
       request.block_origins.size() != request.send.body.size() ||
       request.max_attempts <= 0 ||
       (request.quote_anchor != BridgeQuoteAnchor::None &&
@@ -99,12 +99,12 @@ auto admission_for(const BridgeDeliveryRequest &request,
   std::set<std::pair<std::string, std::string>> inputs;
   for (const auto &member : request.members) {
     member.message.validate();
-    domain::OperationCorrelation{member.member_id}.validate();
+    bot::OperationCorrelation{member.member_id}.validate();
     member.source.validate();
     if (member.message.conversation != source_scope ||
         !members.insert(member.member_id).second ||
         member.input_blocks.empty() ||
-        member.input_blocks.size() > domain::detail::domain_maximum_items ||
+        member.input_blocks.size() > bot::detail::bot_maximum_items ||
         member.source.message != member.message ||
         member.source.media_group != member.media_group ||
         member.source.context.kind !=
@@ -120,7 +120,7 @@ auto admission_for(const BridgeDeliveryRequest &request,
         throw std::invalid_argument("delivery album scope mismatch");
     }
     for (const auto &block : member.input_blocks) {
-      domain::OperationCorrelation{block}.validate();
+      bot::OperationCorrelation{block}.validate();
       if (!inputs.emplace(member.member_id, block).second)
         throw std::invalid_argument("duplicate delivery input identity");
     }
@@ -131,7 +131,7 @@ auto admission_for(const BridgeDeliveryRequest &request,
              : std::nullopt,
          member.input_blocks});
   }
-  auto album_trace = domain::Json::array();
+  auto album_trace = bot::Json::array();
   if (request.album_observations.size() !=
       (any_group ? result.members.size() : 0))
     throw std::invalid_argument("delivery album observation count mismatch");
@@ -154,15 +154,15 @@ auto admission_for(const BridgeDeliveryRequest &request,
                            {"correlation_id", observation.correlation_id},
                            {"source_bot", observation.source_bot}});
   }
-  auto origins = domain::Json::array();
+  auto origins = bot::Json::array();
   for (const auto &block : request.block_origins) {
     if (!block) {
       origins.push_back(nullptr);
       continue;
     }
-    if (block->empty() || block->size() > domain::detail::domain_maximum_items)
+    if (block->empty() || block->size() > bot::detail::bot_maximum_items)
       throw std::invalid_argument("invalid known delivery provenance");
-    auto values = domain::Json::array();
+    auto values = bot::Json::array();
     std::set<std::pair<std::string, std::string>> seen;
     for (const auto &origin : *block) {
       const auto key = std::pair{origin.member_id, origin.input_block};
@@ -180,27 +180,26 @@ auto admission_for(const BridgeDeliveryRequest &request,
   const auto &facts = request.members.front().source.context;
   if (facts.kind != "group" || facts.group_id.empty())
     throw std::invalid_argument("delivery source lacks current group context");
-  const domain::ConfiguredConversation source_route{
-      domain::ConfiguredConversationKind::Group, facts.group_id,
-      facts.topic_id};
+  const bot::ConfiguredConversation source_route{
+      bot::ConfiguredConversationKind::Group, facts.group_id, facts.topic_id};
   const auto resolved_source_route =
       references.resolve(source_scope.installation, source_route);
   if (!resolved_source_route.ok() ||
       *resolved_source_route.value != source_scope)
     throw std::invalid_argument("delivery source route evidence conflicts");
-  domain::Json policy = {
+  bot::Json policy = {
       {"source_route",
        {{"group_id", facts.group_id},
-        {"topic_id", facts.topic_id ? domain::Json(*facts.topic_id)
-                                    : domain::Json(nullptr)}}},
+        {"topic_id",
+         facts.topic_id ? bot::Json(*facts.topic_id) : bot::Json(nullptr)}}},
       {"publication",
        {{"event_id", request.publication.event_id},
         {"correlation_id", request.publication.correlation_id},
         {"source_bot", request.publication.source_bot}}},
       {"delivery", static_cast<unsigned>(request.send.delivery)},
       {"limits", request.send.limits},
-      {"reply_to", request.send.reply_to ? domain::Json(*request.send.reply_to)
-                                         : domain::Json(nullptr)},
+      {"reply_to", request.send.reply_to ? bot::Json(*request.send.reply_to)
+                                         : bot::Json(nullptr)},
       {"quote_anchor", request.quote_anchor == BridgeQuoteAnchor::None
                            ? "none"
                            : "first-confirmed"},
@@ -223,7 +222,7 @@ auto admission_for(const BridgeDeliveryRequest &request,
   result.policy_and_limits = encode("BridgeDeliveryPolicy", policy);
   return result;
 }
-auto physical(const domain::SendOutputDetails &detail,
+auto physical(const bot::SendOutputDetails &detail,
               std::optional<std::int64_t> ordinal,
               const BridgeDeliveryRequest *request) -> ledger::PhysicalOutput {
   detail.validate();
@@ -241,7 +240,7 @@ auto physical(const domain::SendOutputDetails &detail,
   if (request && detail.content) {
     std::vector<ledger::Provenance> origins;
     for (const auto &slice : *detail.content) {
-      domain::validate_content_slice(slice, request->send);
+      bot::validate_content_slice(slice, request->send);
       const auto &block = request->block_origins.at(slice.block_index);
       if (!block || (slice.text && block->size() != 1))
         return result;
@@ -260,15 +259,15 @@ auto physical(const domain::SendOutputDetails &detail,
   return result;
 }
 auto terminal(const BridgeDeliveryRequest &request,
-              const domain::SendOutcome &outcome) -> ledger::AttemptResult {
-  domain::validate_send_outcome(request.send, outcome);
+              const bot::SendOutcome &outcome) -> ledger::AttemptResult {
+  bot::validate_send_outcome(request.send, outcome);
   ledger::AttemptResult result{
       false,        ledger::Effect::DefinitelyNotSubmitted, false,   {},
       std::nullopt, encode("SendOutcome", outcome),         now_ms()};
   std::visit(
       [&](const auto &value) {
         if constexpr (std::same_as<std::decay_t<decltype(value)>,
-                                   domain::SendReceipt>) {
+                                   bot::SendReceipt>) {
           result.complete = true;
           result.effect = ledger::Effect::ConfirmedOnly;
         } else {
@@ -280,9 +279,9 @@ auto terminal(const BridgeDeliveryRequest &request,
           result.retryable =
               value.confirmed_messages.empty() &&
               !value.may_have_unconfirmed_messages && value.error.retryable &&
-              value.error.code != domain::BotOperationErrorCode::Cancelled &&
+              value.error.code != bot::BotOperationErrorCode::Cancelled &&
               value.error.submission_safety ==
-                  domain::SubmissionSafety::DefinitelyNotSubmitted;
+                  bot::SubmissionSafety::DefinitelyNotSubmitted;
         }
         for (std::size_t i = 0; i < value.output_details.size(); ++i)
           result.outputs.push_back(physical(
@@ -297,7 +296,7 @@ auto terminal(const BridgeDeliveryRequest &request,
 } // namespace
 
 auto detail::describe_delivery_outcome(const BridgeDeliveryRequest &request,
-                                       const domain::SendOutcome &outcome)
+                                       const bot::SendOutcome &outcome)
     -> ledger::AttemptResult {
   return terminal(request, outcome);
 }
@@ -401,7 +400,7 @@ auto send_bridge_delivery(
 }
 
 auto detail::submit_delivery_attempt(
-    std::shared_ptr<domain::BotOperationGateway> gateway,
+    std::shared_ptr<bot::BotOperationGateway> gateway,
     std::shared_ptr<BridgeStateRepository> repository,
     std::shared_ptr<obcx::core::BlockingExecutor> blocking,
     BridgeDeliveryRequest request, std::int64_t completed_attempts,
@@ -417,10 +416,10 @@ auto detail::submit_delivery_attempt(
   auto association = correlation(request);
   // Sole provider call, only after durable Created admission. An exception or
   // persistence failure leaves the admitted attempt uncertain, never missing.
-  domain::SendOutcome outcome = domain::SendFailure{
-      {domain::BotOperationErrorCode::Cancelled,
+  bot::SendOutcome outcome = bot::SendFailure{
+      {bot::BotOperationErrorCode::Cancelled,
        "delivery cancelled before invocation", std::nullopt, std::nullopt,
-       false, domain::SubmissionSafety::DefinitelyNotSubmitted},
+       false, bot::SubmissionSafety::DefinitelyNotSubmitted},
       {},
       {},
       false};
@@ -433,8 +432,8 @@ auto detail::submit_delivery_attempt(
   try {
     if (cancellation.cancelled() == boost::asio::cancellation_type::none &&
         (!token || token->valid()))
-      outcome = co_await domain::BotClient{*gateway}.send(
-          request.send, std::move(association));
+      outcome = co_await bot::BotClient{*gateway}.send(request.send,
+                                                       std::move(association));
   } catch (...) {
     // No returned outcome means the durable attempt stays unresolved. Never
     // persist the initial no-send placeholder as evidence for a thrown call.
@@ -491,7 +490,7 @@ auto detail::submit_delivery_attempt(
                                            std::move(outcome),
                                            std::move(failure_notification));
   const bool publish =
-      std::holds_alternative<domain::SendReceipt>(outcome) &&
+      std::holds_alternative<bot::SendReceipt>(outcome) &&
       persisted.first == ledger::AdmissionResult::Created &&
       persisted.second->state == ledger::DeliveryState::Complete;
   co_return BridgeDeliveryResult{std::move(*persisted.second),
@@ -499,14 +498,14 @@ auto detail::submit_delivery_attempt(
 }
 
 auto bridge_delivery_output_messages(const ledger::DeliverySnapshot &snapshot)
-    -> std::vector<domain::MessageRef> {
+    -> std::vector<bot::MessageRef> {
   if (!snapshot.admission)
     throw std::runtime_error("delivery has no bound scope");
   if (snapshot.state == ledger::DeliveryState::Complete &&
       (!snapshot.completeness_known || snapshot.outputs.empty()))
     throw std::runtime_error(
         "complete delivery lacks complete output evidence");
-  std::vector<domain::MessageRef> messages;
+  std::vector<bot::MessageRef> messages;
   for (const auto &output : snapshot.outputs) {
     if (snapshot.state == ledger::DeliveryState::Complete &&
         output.ordinal != std::optional<std::int64_t>{
@@ -522,7 +521,7 @@ auto bridge_delivery_output_messages(const ledger::DeliverySnapshot &snapshot)
   return messages;
 }
 auto bridge_delivery_find_output(const ledger::DeliverySnapshot &snapshot,
-                                 const domain::MessageRef &message)
+                                 const bot::MessageRef &message)
     -> const ledger::PhysicalOutput & {
   message.validate();
   if (!snapshot.admission ||
@@ -553,7 +552,7 @@ auto latest_member_revision(const ledger::DeliverySnapshot &snapshot,
     -> const ledger::RevisionSnapshot * {
   const ledger::RevisionSnapshot *latest = nullptr;
   if (!snapshot.admission ||
-      snapshot.revisions.size() > domain::detail::domain_maximum_items)
+      snapshot.revisions.size() > bot::detail::bot_maximum_items)
     throw std::runtime_error("invalid edit history scope or bound");
   for (const auto &revision : snapshot.revisions) {
     if (revision.admission.delivery_id != snapshot.delivery_id ||
@@ -575,16 +574,16 @@ auto latest_member_revision(const ledger::DeliverySnapshot &snapshot,
 } // namespace
 
 auto bridge_delivery_member_outputs(const ledger::DeliverySnapshot &snapshot,
-                                    const domain::MessageRef &source)
-    -> std::vector<domain::MessageRef> {
+                                    const bot::MessageRef &source)
+    -> std::vector<bot::MessageRef> {
   source.validate();
   if (!snapshot.admission ||
       snapshot.admission->delivery_id != snapshot.delivery_id ||
       snapshot.admission->source_scope !=
           encode("ConversationRef", source.conversation) ||
       snapshot.members.empty() ||
-      snapshot.members.size() > domain::detail::domain_maximum_items ||
-      snapshot.outputs.size() > domain::detail::domain_maximum_items)
+      snapshot.members.size() > bot::detail::bot_maximum_items ||
+      snapshot.outputs.size() > bot::detail::bot_maximum_items)
     throw std::runtime_error("invalid bridge member output selection scope");
   // Admission is immutable; late proven members live in the member rows.
   // Original members must remain identical, but additional rows are allowed
@@ -610,7 +609,7 @@ auto bridge_delivery_member_outputs(const ledger::DeliverySnapshot &snapshot,
         (expected != admitted.end() && *expected->second != member) ||
         message.conversation != source.conversation ||
         member.input_blocks.empty() ||
-        member.input_blocks.size() > domain::detail::domain_maximum_items)
+        member.input_blocks.size() > bot::detail::bot_maximum_items)
       throw std::runtime_error("conflicting bridge member evidence");
     auto &blocks = inputs[member.member_id];
     for (const auto &block : member.input_blocks)
@@ -643,7 +642,7 @@ auto bridge_delivery_member_outputs(const ledger::DeliverySnapshot &snapshot,
     });
     for (const auto &output : revision->checkpoint->outputs)
       active.push_back(output.message_ref);
-    std::vector<domain::MessageRef> result;
+    std::vector<bot::MessageRef> result;
     for (const auto &ref : active) {
       auto message = decode_message(ref);
       const auto &output = bridge_delivery_find_output(snapshot, message);
@@ -677,11 +676,11 @@ auto bridge_delivery_member_outputs(const ledger::DeliverySnapshot &snapshot,
     return result;
   }
   const auto messages = bridge_delivery_output_messages(snapshot);
-  std::vector<domain::MessageRef> result;
+  std::vector<bot::MessageRef> result;
   for (std::size_t i = 0; i < snapshot.outputs.size(); ++i) {
     const auto &output = snapshot.outputs[i];
     if (!output.provenance || output.provenance->empty() ||
-        output.provenance->size() > domain::detail::domain_maximum_items)
+        output.provenance->size() > bot::detail::bot_maximum_items)
       throw std::runtime_error(
           "unknown output provenance forbids member mutation");
     bool includes_member = false;
@@ -706,7 +705,7 @@ auto bridge_delivery_member_outputs(const ledger::DeliverySnapshot &snapshot,
 }
 
 auto bridge_delivery_quote_anchor(const ledger::DeliverySnapshot &snapshot)
-    -> std::optional<domain::MessageRef> {
+    -> std::optional<bot::MessageRef> {
   if (!snapshot.quote_anchor)
     return std::nullopt;
   auto anchor = decode_message(*snapshot.quote_anchor);
@@ -716,8 +715,8 @@ auto bridge_delivery_quote_anchor(const ledger::DeliverySnapshot &snapshot)
   return anchor;
 }
 auto bridge_delivery_member_quote_anchor(
-    const ledger::DeliverySnapshot &snapshot, const domain::MessageRef &source)
-    -> std::optional<domain::MessageRef> {
+    const ledger::DeliverySnapshot &snapshot, const bot::MessageRef &source)
+    -> std::optional<bot::MessageRef> {
   source.validate();
   auto selected = source;
   auto wanted = encode("MessageRef", source);
@@ -770,9 +769,9 @@ auto bridge_delivery_member_quote_anchor(
 }
 auto is_bridge_delivery_output(BridgeStateRepository &repository,
                                const std::string &pair_id,
-                               const domain::MessageRef &message) -> bool {
+                               const bot::MessageRef &message) -> bool {
   message.validate();
-  domain::OperationCorrelation{pair_id}.validate();
+  bot::OperationCorrelation{pair_id}.validate();
   const auto result = repository.resolve_observed_output(
       pair_id, encode("ConversationRef", message.conversation),
       encode("MessageRef", message));
@@ -785,14 +784,15 @@ auto is_bridge_delivery_output(BridgeStateRepository &repository,
   throw std::runtime_error("ambiguous or corrupt bridge output observation");
 }
 
-auto resolve_bridge_delivery_source(
-    BridgeStateRepository &repository, const std::string &pair_id,
-    const domain::ConversationRef &original_scope,
-    const domain::ReplyInfo &reply) -> std::optional<domain::MessageRef> {
+auto resolve_bridge_delivery_source(BridgeStateRepository &repository,
+                                    const std::string &pair_id,
+                                    const bot::ConversationRef &original_scope,
+                                    const bot::ReplyInfo &reply)
+    -> std::optional<bot::MessageRef> {
   reply.validate();
   original_scope.validate();
-  domain::OperationCorrelation{pair_id}.validate();
-  if (reply.relation() != domain::ReplyRelation::SameConversation ||
+  bot::OperationCorrelation{pair_id}.validate();
+  if (reply.relation() != bot::ReplyRelation::SameConversation ||
       !reply.reference())
     throw std::invalid_argument(
         "bridge source attribution requires a same-conversation reply");
@@ -814,12 +814,12 @@ auto resolve_bridge_delivery_source(
 
 auto resolve_bridge_delivery_reply(BridgeStateRepository &repository,
                                    const std::string &pair_id,
-                                   const domain::ConversationRef &target,
-                                   const domain::ReplyInfo &reply)
-    -> std::optional<domain::MessageRef> {
+                                   const bot::ConversationRef &target,
+                                   const bot::ReplyInfo &reply)
+    -> std::optional<bot::MessageRef> {
   reply.validate();
   target.validate();
-  if (reply.relation() != domain::ReplyRelation::SameConversation ||
+  if (reply.relation() != bot::ReplyRelation::SameConversation ||
       !reply.reference())
     return std::nullopt;
   const auto source_scope =
@@ -838,7 +838,7 @@ auto resolve_bridge_delivery_reply(BridgeStateRepository &repository,
       (direct.status == ledger::ResolutionStatus::Unique &&
        reverse.status == ledger::ResolutionStatus::Unique))
     throw std::runtime_error("ambiguous or corrupt bridge reply mapping");
-  std::optional<domain::MessageRef> result;
+  std::optional<bot::MessageRef> result;
   if (direct.status == ledger::ResolutionStatus::Unique) {
     if (direct.delivery_ids.size() != 1)
       throw std::runtime_error("invalid unique bridge reply mapping");
@@ -860,7 +860,7 @@ auto resolve_bridge_delivery_reply(BridgeStateRepository &repository,
 namespace {
 struct MessageMutationPlan {
   std::string delivery_id;
-  std::vector<domain::MessageRef> outputs;
+  std::vector<bot::MessageRef> outputs;
   std::vector<std::vector<ledger::Provenance>> provenance;
   std::string source_member_id;
   bool original_source;
@@ -869,8 +869,8 @@ struct MessageMutationPlan {
 // rechecks authority transactionally; this plan itself grants no mutation.
 auto select_message_mutation_plan(
     const std::shared_ptr<BridgeStateRepository> &repository,
-    const std::string &pair, const domain::ConversationRef &target,
-    const domain::ReplyInfo &reply) -> std::optional<MessageMutationPlan> {
+    const std::string &pair, const bot::ConversationRef &target,
+    const bot::ReplyInfo &reply) -> std::optional<MessageMutationPlan> {
   using Plan = MessageMutationPlan;
   const auto source_scope =
       encode("ConversationRef", reply.source().conversation);
@@ -943,12 +943,12 @@ auto recall_bridge_delivery(
     std::shared_ptr<BridgeCommandOperations> operations,
     std::shared_ptr<BridgeStateRepository> repository,
     std::shared_ptr<obcx::core::BlockingExecutor> blocking,
-    domain::ReplyInfo reply, std::string qq_group_id)
+    bot::ReplyInfo reply, std::string qq_group_id)
     -> boost::asio::awaitable<std::optional<BridgeRecallResult>> {
   if (!operations || !repository || !blocking)
     throw std::invalid_argument("recall requires owned operations and storage");
   reply.validate();
-  if (reply.relation() != domain::ReplyRelation::SameConversation ||
+  if (reply.relation() != bot::ReplyRelation::SameConversation ||
       !reply.reference() ||
       reply.source().conversation.installation !=
           operations->telegram_installation())
@@ -966,10 +966,9 @@ auto recall_bridge_delivery(
 
   // Stable across output-set/order changes. A changed first target conflicts
   // with the same fence rather than turning replay into suffix continuation.
-  const auto digest =
-      calculate_hash(domain::Json::array({pair, plan->delivery_id,
-                                          domain::Json(reply.source())})
-                         .dump());
+  const auto digest = calculate_hash(
+      bot::Json::array({pair, plan->delivery_id, bot::Json(reply.source())})
+          .dump());
   if (digest.empty())
     throw std::runtime_error("recall identity hashing failed");
   const auto batch = "bridge-recall-v1:" + digest;
@@ -978,7 +977,7 @@ auto recall_bridge_delivery(
   std::vector<Operation> pending;
   const auto codec = plan->original_source ? "BridgeRecallSourceState"
                                            : "BridgeRecallOutputState";
-  std::vector<domain::BotOperationResult<domain::DeleteReceipt>> checkpoints;
+  std::vector<bot::BotOperationResult<bot::DeleteReceipt>> checkpoints;
   pending.reserve(plan->outputs.size());
   checkpoints.reserve(plan->outputs.size());
   result.targets.reserve(plan->outputs.size());
@@ -986,15 +985,15 @@ auto recall_bridge_delivery(
     const auto &message = plan->outputs[i];
     if (message.conversation != target)
       throw std::runtime_error("recall physical target scope mismatch");
-    const auto output_hash = calculate_hash(domain::Json(message).dump());
+    const auto output_hash = calculate_hash(bot::Json(message).dump());
     if (output_hash.empty())
       throw std::runtime_error("recall output hashing failed");
     const auto id = i == 0 ? batch : batch + ":output:" + output_hash;
-    domain::Json intent = {{"phase", "admitted"},
-                           {"batch", batch},
-                           {"command", reply.source()},
-                           {"source", reply.reference()->target()},
-                           {"target", message}};
+    bot::Json intent = {{"phase", "admitted"},
+                        {"batch", batch},
+                        {"command", reply.source()},
+                        {"source", reply.reference()->target()},
+                        {"target", message}};
     if (plan->original_source) {
       intent["source"] = message;
       intent["anchor"] = reply.reference()->target();
@@ -1009,10 +1008,10 @@ auto recall_bridge_delivery(
       pending.emplace_back(ledger::OutputOperation{
           id, encode("MessageRef", message), encode(codec, intent)});
     }
-    checkpoints.push_back(domain::failed_operation<domain::DeleteReceipt>(
-        domain::BotOperationErrorCode::OutcomeUnknown,
+    checkpoints.push_back(bot::failed_operation<bot::DeleteReceipt>(
+        bot::BotOperationErrorCode::OutcomeUnknown,
         "recall invocation outcome unavailable", false,
-        domain::SubmissionSafety::PossiblySubmitted));
+        bot::SubmissionSafety::PossiblySubmitted));
     result.targets.push_back({message, std::nullopt, false});
   }
 
@@ -1050,23 +1049,23 @@ auto recall_bridge_delivery(
       // The owning unknown checkpoint is installed before invocation. A throw
       // or failed finalization cannot discard an earlier physical receipt.
       if (cancellation.cancelled() != boost::asio::cancellation_type::none)
-        *output.outcome = domain::failed_operation<domain::DeleteReceipt>(
-            domain::BotOperationErrorCode::Cancelled,
+        *output.outcome = bot::failed_operation<bot::DeleteReceipt>(
+            bot::BotOperationErrorCode::Cancelled,
             "recall cancelled before invocation", false,
-            domain::SubmissionSafety::DefinitelyNotSubmitted);
+            bot::SubmissionSafety::DefinitelyNotSubmitted);
       else
         *output.outcome =
             co_await operations->delete_onebot11_message(output.message);
       output.outcome->validate();
       const bool matched = output.outcome->ok() &&
                            output.outcome->value->message == output.message;
-      domain::Json terminal = {{"phase", "finished"},
-                               {"batch", batch},
-                               {"command", reply.source()},
-                               {"target", output.message},
-                               {"source", reply.reference()->target()},
-                               {"matched_receipt", matched},
-                               {"outcome", *output.outcome}};
+      bot::Json terminal = {{"phase", "finished"},
+                            {"batch", batch},
+                            {"command", reply.source()},
+                            {"target", output.message},
+                            {"source", reply.reference()->target()},
+                            {"matched_receipt", matched},
+                            {"outcome", *output.outcome}};
       if (plan->original_source) {
         terminal["source"] = output.message;
         terminal["anchor"] = reply.reference()->target();
@@ -1102,9 +1101,9 @@ auto recall_bridge_delivery(
         // receipt stop this invocation; no earlier target is retried.
         if (output.outcome->value || !output.outcome->error ||
             output.outcome->error->code ==
-                domain::BotOperationErrorCode::Cancelled ||
+                bot::BotOperationErrorCode::Cancelled ||
             output.outcome->error->submission_safety !=
-                domain::SubmissionSafety::DefinitelyNotSubmitted)
+                bot::SubmissionSafety::DefinitelyNotSubmitted)
           break;
       }
     }
@@ -1126,7 +1125,7 @@ auto propagate_bridge_recall(
     std::shared_ptr<BridgeCommandOperations> operations,
     std::shared_ptr<BridgeStateRepository> repository,
     std::shared_ptr<obcx::core::BlockingExecutor> blocking,
-    domain::MessageDeleted deleted, const bool delete_outputs,
+    bot::MessageDeleted deleted, const bool delete_outputs,
     obcx::telegram::bot::FormattedText replacement)
     -> boost::asio::awaitable<std::optional<BridgeRecallPropagationResult>> {
   if (!operations || !repository || !blocking)
@@ -1167,8 +1166,7 @@ auto propagate_bridge_recall(
   if (outputs.empty())
     co_return result;
   const auto digest = calculate_hash(
-      domain::Json::array({pair, snapshot->delivery_id, deleted.message})
-          .dump());
+      bot::Json::array({pair, snapshot->delivery_id, deleted.message}).dump());
   if (digest.empty())
     throw std::runtime_error("recall notification hashing failed");
   const auto batch = "bridge-recall-notice-v1:" + digest;
@@ -1197,10 +1195,10 @@ auto propagate_bridge_recall(
       throw std::runtime_error(
           "Telegram media output cannot be edited as text");
     provenance.push_back(*output.provenance);
-    const auto hash = calculate_hash(domain::Json(message).dump());
+    const auto hash = calculate_hash(bot::Json(message).dump());
     if (hash.empty())
       throw std::runtime_error("recall output hashing failed");
-    domain::Json intent = {
+    bot::Json intent = {
         {"phase", "admitted"},       {"batch", batch},
         {"source", deleted.message}, {"observed_at", deleted.received_at},
         {"target", message},         {"delete", delete_outputs}};
@@ -1212,14 +1210,14 @@ auto propagate_bridge_recall(
     pending.push_back({i == 0 ? batch : batch + ":output:" + hash,
                        encode("MessageRef", message), encode(codec, intent)});
     const auto unknown = []<typename T>() {
-      return domain::failed_operation<T>(
-          domain::BotOperationErrorCode::OutcomeUnknown,
+      return bot::failed_operation<T>(
+          bot::BotOperationErrorCode::OutcomeUnknown,
           "recall propagation outcome unavailable", false,
-          domain::SubmissionSafety::PossiblySubmitted);
+          bot::SubmissionSafety::PossiblySubmitted);
     };
     if (delete_outputs)
       checkpoints.emplace_back(
-          unknown.template operator()<domain::DeleteReceipt>());
+          unknown.template operator()<bot::DeleteReceipt>());
     else
       checkpoints.emplace_back(
           unknown.template operator()<obcx::telegram::bot::EditTextReceipt>());
@@ -1247,16 +1245,16 @@ auto propagate_bridge_recall(
       target.outcome = std::move(checkpoints[i]);
       if (cancellation.cancelled() != boost::asio::cancellation_type::none) {
         if (delete_outputs)
-          *target.outcome = domain::failed_operation<domain::DeleteReceipt>(
-              domain::BotOperationErrorCode::Cancelled,
+          *target.outcome = bot::failed_operation<bot::DeleteReceipt>(
+              bot::BotOperationErrorCode::Cancelled,
               "recall propagation cancelled before invocation", false,
-              domain::SubmissionSafety::DefinitelyNotSubmitted);
+              bot::SubmissionSafety::DefinitelyNotSubmitted);
         else
           *target.outcome =
-              domain::failed_operation<obcx::telegram::bot::EditTextReceipt>(
-                  domain::BotOperationErrorCode::Cancelled,
+              bot::failed_operation<obcx::telegram::bot::EditTextReceipt>(
+                  bot::BotOperationErrorCode::Cancelled,
                   "recall propagation cancelled before invocation", false,
-                  domain::SubmissionSafety::DefinitelyNotSubmitted);
+                  bot::SubmissionSafety::DefinitelyNotSubmitted);
       } else if (delete_outputs)
         *target.outcome =
             co_await operations->delete_telegram_output(target.message);
@@ -1269,7 +1267,7 @@ auto propagate_bridge_recall(
             return outcome.ok() && outcome.value->message == target.message;
           },
           *target.outcome);
-      domain::Json terminal = {
+      bot::Json terminal = {
           {"phase", "finished"},
           {"batch", batch},
           {"source", deleted.message},
@@ -1278,7 +1276,7 @@ auto propagate_bridge_recall(
           {"delete", delete_outputs},
           {"matched_receipt", target.matched_receipt},
           {"outcome",
-           std::visit([](const auto &outcome) { return domain::Json(outcome); },
+           std::visit([](const auto &outcome) { return bot::Json(outcome); },
                       *target.outcome)}};
       if (!delete_outputs)
         terminal["request"] = obcx::telegram::bot::EditFormattedTextRequest{
@@ -1310,7 +1308,7 @@ auto react_bridge_delivery(
     std::shared_ptr<BridgeCommandOperations> operations,
     std::shared_ptr<BridgeStateRepository> repository,
     std::shared_ptr<obcx::core::BlockingExecutor> blocking,
-    domain::ReplyInfo reply, std::string qq_group_id, std::string emoji_id,
+    bot::ReplyInfo reply, std::string qq_group_id, std::string emoji_id,
     const bool set)
     -> boost::asio::awaitable<std::optional<BridgeReactionResult>> {
   using Request = obcx::onebot11::bot::SetOneBotMessageEmojiLikeRequest;
@@ -1319,7 +1317,7 @@ auto react_bridge_delivery(
     throw std::invalid_argument(
         "reaction requires owned operations and storage");
   reply.validate();
-  if (reply.relation() != domain::ReplyRelation::SameConversation ||
+  if (reply.relation() != bot::ReplyRelation::SameConversation ||
       !reply.reference() ||
       reply.source().conversation.installation !=
           operations->telegram_installation())
@@ -1329,15 +1327,14 @@ auto react_bridge_delivery(
   const auto target = operations->onebot11_conversation(qq_group_id);
   const auto command_ref = encode("MessageRef", reply.source());
   const auto digest = calculate_hash(
-      domain::Json::array({pair, "qq-message-reaction", reply.source()})
-          .dump());
+      bot::Json::array({pair, "qq-message-reaction", reply.source()}).dump());
   if (digest.empty())
     throw std::runtime_error("reaction command hashing failed");
   const auto command_id = "bridge-command-v1:" + digest;
   struct Selection {
     std::optional<MessageMutationPlan> plan;
     std::vector<Request> requests;
-    domain::Json evidence;
+    bot::Json evidence;
     bool replayed = false;
   };
   const auto selection = co_await blocking->run([operations, repository, pair,
@@ -1399,25 +1396,25 @@ auto react_bridge_delivery(
   using Operation =
       std::variant<ledger::OutputOperation, ledger::SourceOperation>;
   std::vector<Operation> pending;
-  std::vector<domain::BotOperationResult<Receipt>> checkpoints;
+  std::vector<bot::BotOperationResult<Receipt>> checkpoints;
   const auto codec = result.original_source ? "BridgeReactionSourceState"
                                             : "BridgeReactionOutputState";
   for (const auto &request : selection.requests) {
-    checkpoints.push_back(domain::failed_operation<Receipt>(
-        domain::BotOperationErrorCode::OutcomeUnknown,
+    checkpoints.push_back(bot::failed_operation<Receipt>(
+        bot::BotOperationErrorCode::OutcomeUnknown,
         "reaction invocation outcome unavailable", false,
-        domain::SubmissionSafety::PossiblySubmitted));
+        bot::SubmissionSafety::PossiblySubmitted));
     result.targets.push_back({request.message, std::nullopt, false, false});
     if (!selection.plan)
       continue;
-    const auto hash = calculate_hash(domain::Json(request.message).dump());
+    const auto hash = calculate_hash(bot::Json(request.message).dump());
     if (hash.empty())
       throw std::runtime_error("reaction target hashing failed");
     const auto id = command_id + ":target:" + hash;
-    const auto intent = encode(codec, domain::Json{{"phase", "admitted"},
-                                                   {"command", command_id},
-                                                   {"request", request},
-                                                   {"reply", reply}});
+    const auto intent = encode(codec, bot::Json{{"phase", "admitted"},
+                                                {"command", command_id},
+                                                {"request", request},
+                                                {"reply", reply}});
     if (result.original_source)
       pending.emplace_back(ledger::SourceOperation{
           id, selection.plan->source_member_id,
@@ -1474,10 +1471,10 @@ auto react_bridge_delivery(
         auto &item = result.targets[i];
         item.outcome = std::move(checkpoints[i]);
         if (cancellation.cancelled() != boost::asio::cancellation_type::none)
-          *item.outcome = domain::failed_operation<Receipt>(
-              domain::BotOperationErrorCode::Cancelled,
+          *item.outcome = bot::failed_operation<Receipt>(
+              bot::BotOperationErrorCode::Cancelled,
               "reaction cancelled before invocation", false,
-              domain::SubmissionSafety::DefinitelyNotSubmitted);
+              bot::SubmissionSafety::DefinitelyNotSubmitted);
         else
           *item.outcome = co_await operations->set_onebot11_message_emoji_like(
               selection.requests[i]);
@@ -1489,12 +1486,12 @@ auto react_bridge_delivery(
         item.matched_receipt = matched;
         if (selection.plan) {
           const auto terminal =
-              encode(codec, domain::Json{{"phase", "finished"},
-                                         {"command", command_id},
-                                         {"request", selection.requests[i]},
-                                         {"reply", reply},
-                                         {"matched_receipt", matched},
-                                         {"outcome", *item.outcome}});
+              encode(codec, bot::Json{{"phase", "finished"},
+                                      {"command", command_id},
+                                      {"request", selection.requests[i]},
+                                      {"reply", reply},
+                                      {"matched_receipt", matched},
+                                      {"outcome", *item.outcome}});
           const auto completed = std::visit(
               [&](auto operation) -> Operation {
                 operation.result = terminal;
@@ -1522,9 +1519,9 @@ auto react_bridge_delivery(
           result.interrupted = true;
           if (item.outcome->value || !item.outcome->error ||
               item.outcome->error->code ==
-                  domain::BotOperationErrorCode::Cancelled ||
+                  bot::BotOperationErrorCode::Cancelled ||
               item.outcome->error->submission_safety !=
-                  domain::SubmissionSafety::DefinitelyNotSubmitted)
+                  bot::SubmissionSafety::DefinitelyNotSubmitted)
             break;
         }
       }
@@ -1537,20 +1534,18 @@ auto react_bridge_delivery(
   }
   if (admitted) {
     try {
-      domain::Json targets = domain::Json::array();
+      bot::Json targets = bot::Json::array();
       for (const auto &item : result.targets)
-        targets.push_back(
-            {{"message", item.message},
-             {"outcome", item.outcome ? domain::Json(*item.outcome)
-                                      : domain::Json(nullptr)},
-             {"child_journal_persisted", item.persisted},
-             {"matched_receipt", item.matched_receipt}});
+        targets.push_back({{"message", item.message},
+                           {"outcome", item.outcome ? bot::Json(*item.outcome)
+                                                    : bot::Json(nullptr)},
+                           {"child_journal_persisted", item.persisted},
+                           {"matched_receipt", item.matched_receipt}});
       auto completed = command;
-      completed.outcome =
-          encode("BridgeReactionOutcome",
-                 domain::Json{{"targets", targets},
-                              {"interrupted", result.interrupted},
-                              {"replayed", result.replayed}});
+      completed.outcome = encode("BridgeReactionOutcome",
+                                 bot::Json{{"targets", targets},
+                                           {"interrupted", result.interrupted},
+                                           {"replayed", result.replayed}});
       (void)co_await blocking->run([repository, command, completed] {
         return repository->finish_command_operation(command, completed);
       });
@@ -1580,11 +1575,11 @@ auto record_bridge_delivery_confirmation(
   if (!is_bridge_delivery_confirmation(confirmation))
     return false;
   confirmation.validate();
-  domain::OperationCorrelation{confirmation.attempt_id}.validate();
+  bot::OperationCorrelation{confirmation.attempt_id}.validate();
   if (confirmation.attempt_id.starts_with(revision_correlation_prefix)) {
     const auto suffix =
         confirmation.attempt_id.substr(revision_correlation_prefix.size());
-    const auto ids = domain::Json::parse(suffix);
+    const auto ids = bot::Json::parse(suffix);
     if (!ids.is_array() || ids.size() != 3 || !ids[0].is_string() ||
         !ids[1].is_string() || !ids[2].is_string() || ids.dump() != suffix)
       throw std::invalid_argument("noncanonical bridge edit correlation");
@@ -1592,7 +1587,7 @@ auto record_bridge_delivery_confirmation(
     const auto revision_id = ids[1].get<std::string>();
     const auto attempt_id = ids[2].get<std::string>();
     for (const auto &value : {id, revision_id, attempt_id})
-      domain::OperationCorrelation{value}.validate();
+      bot::OperationCorrelation{value}.validate();
     const auto snapshot = repository.load_delivery(id);
     if (!snapshot || !snapshot->admission)
       return false;
@@ -1614,14 +1609,14 @@ auto record_bridge_delivery_confirmation(
     return true;
   }
   const auto suffix = confirmation.attempt_id.substr(correlation_prefix.size());
-  const auto ids = domain::Json::parse(suffix);
+  const auto ids = bot::Json::parse(suffix);
   if (!ids.is_array() || ids.size() != 2 || !ids[0].is_string() ||
       !ids[1].is_string() || ids.dump() != suffix)
     throw std::invalid_argument("noncanonical bridge delivery correlation");
   const auto id = ids[0].get<std::string>(),
              attempt = ids[1].get<std::string>();
-  domain::OperationCorrelation{id}.validate();
-  domain::OperationCorrelation{attempt}.validate();
+  bot::OperationCorrelation{id}.validate();
+  bot::OperationCorrelation{attempt}.validate();
   const auto snapshot = repository.load_delivery(id);
   if (!snapshot || !snapshot->admission)
     return false;

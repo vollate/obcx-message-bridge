@@ -4,7 +4,7 @@
 #include <algorithm>
 #include <boost/system/error_code.hpp>
 #include <common/logger.hpp>
-#include <core/bot/domain_codec.hpp>
+#include <core/bot/bot_codec.hpp>
 #include <utility>
 
 namespace bridge::telegram {

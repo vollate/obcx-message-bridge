@@ -20,7 +20,7 @@ namespace fs = std::filesystem;
 using Clock = std::chrono::steady_clock;
 // Reuse the SDK's owned-media ceiling for decoded PCM as well as input. At
 // mono 24 kHz s16 this also bounds duration; GIF duration is not a voice limit.
-constexpr auto pcm_limit = obcx::bot::detail::domain_maximum_bytes;
+constexpr auto pcm_limit = obcx::bot::detail::bot_maximum_bytes;
 constexpr int sample_rate = 24000;
 
 [[noreturn]] void fail(const char *reason) {

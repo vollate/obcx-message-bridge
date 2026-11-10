@@ -12,10 +12,13 @@
 #include "received_message_repository.hpp"
 
 #include <common/json_utils.hpp>
-#include <core/bot/domain_codec.hpp>
+#include <core/bot/bot_codec.hpp>
 #include <core/bot/operation_gateway.hpp>
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -186,7 +189,7 @@ auto BridgeActor::prepare_generation(obcx::core::ActorContext &context)
       auto worker = std::make_shared<BridgeDeliveryRetryWorker>(
           *executor, gateway, repository, blocking, references, lifecycle,
           events, *config,
-          static_cast<std::int64_t>(obcx::bot::detail::domain_maximum_items));
+          static_cast<std::int64_t>(obcx::bot::detail::bot_maximum_items));
       std::weak_ptr<BridgeDeliveryRetryWorker> weak = worker;
       lifecycle->subscribe(
           [weak](
@@ -378,7 +381,7 @@ auto BridgeActor::handle(
     co_return obcx::core::ActorResult::success();
   }
   // Check the original stored source before repository resolution or awaits.
-  // These archival keys are not reconstructed from opaque domain IDs.
+  // These archival keys are not reconstructed from opaque bot IDs.
   try {
     stored.message.validate();
     stored.source.validate(stored.message);
@@ -426,8 +429,8 @@ auto BridgeActor::handle(
                forwarded)]() mutable -> asio::awaitable<BridgeForwardResult> {
             co_return co_await forwarder->forward_message(stored, forwarded);
           });
-      if (forward_result.domain_revision) {
-        const auto &revision = *forward_result.domain_revision;
+      if (forward_result.bot_revision) {
+        const auto &revision = *forward_result.bot_revision;
         if (revision.newly_completed) {
           auto result = obcx::core::ActorResult::success();
           result.emit(bridge_revision_notification(revision));
@@ -453,8 +456,8 @@ auto BridgeActor::handle(
         result.emit(std::move(notification));
         co_return result;
       }
-      if (forward_result.domain_delivery) {
-        const auto &delivery = *forward_result.domain_delivery;
+      if (forward_result.bot_delivery) {
+        const auto &delivery = *forward_result.bot_delivery;
         if (delivery.newly_completed) {
           if (delivery.persisted.state != ledger::DeliveryState::Complete ||
               !delivery.outcome ||
@@ -476,7 +479,8 @@ auto BridgeActor::handle(
         }
         // Even a zero-effect retry belongs to the durable retry owner, not a
         // replay of MessageStored or the predecessor CQ retry queue.
-        std::string diagnostic = "bridge delivery is not complete";
+        std::string diagnostic = "message was not fully forwarded";
+        bool sent_something = false;
         if (delivery.outcome) {
           if (const auto *failure =
                   std::get_if<obcx::bot::SendFailure>(&*delivery.outcome)) {
@@ -484,14 +488,49 @@ auto BridgeActor::handle(
             // confirmed/possible effects or granting ingress retry permission.
             const auto reason = classify_bridge_operation_failure(
                 BridgeBotOperationFailure{failure->error});
-            diagnostic +=
-                ": " + reason.diagnostic + "; confirmed=" +
-                std::to_string(failure->confirmed_messages.size()) +
-                "; possible_unconfirmed=" +
-                (failure->may_have_unconfirmed_messages ? "true" : "false");
+            const auto confirmed =
+                std::to_string(failure->confirmed_messages.size());
+            sent_something = !failure->confirmed_messages.empty() ||
+                             failure->may_have_unconfirmed_messages;
+            diagnostic += ": " + reason.diagnostic;
+            if (failure->may_have_unconfirmed_messages)
+              diagnostic += "; " + confirmed +
+                            " message(s) confirmed sent, others may also have "
+                            "been sent";
+            else if (failure->confirmed_messages.empty())
+              diagnostic += "; nothing was sent";
+            else
+              diagnostic +=
+                  "; " + confirmed + " message(s) sent, the rest were not";
           } else {
-            diagnostic += ": SDK receipt awaits ledger reconciliation";
+            diagnostic += ": it was sent, but the delivery record has not "
+                          "been updated yet";
           }
+        }
+        const auto &persisted = delivery.persisted;
+        if (!persisted.safe_to_retry) {
+          diagnostic += "; not retried automatically";
+          if (sent_something)
+            diagnostic += " to avoid sending duplicates";
+          else if (persisted.admission &&
+                   std::cmp_greater_equal(persisted.attempts.size(),
+                                          persisted.admission->max_attempts))
+            diagnostic += " after " +
+                          std::to_string(persisted.attempts.size()) +
+                          " attempt(s)";
+        } else if (persisted.retry && persisted.admission &&
+                   persisted.retry->next_retry_at_ms !=
+                       std::numeric_limits<std::int64_t>::max()) {
+          const auto now_ms =
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::system_clock::now().time_since_epoch())
+                  .count();
+          const auto wait_ms = std::max<std::int64_t>(
+              0, persisted.retry->next_retry_at_ms - now_ms);
+          diagnostic +=
+              "; retrying in " + std::to_string((wait_ms + 999) / 1000) +
+              "s (attempt " + std::to_string(persisted.retry->retry_count + 1) +
+              " of " + std::to_string(persisted.admission->max_attempts) + ")";
         }
         auto result = obcx::core::ActorResult::failed(
             "bridge_delivery_incomplete", diagnostic, false);

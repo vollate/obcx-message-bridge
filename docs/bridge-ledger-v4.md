@@ -182,7 +182,7 @@ included by the existing repository translation unit.
 | `bridge_source_operations` | Original-source mutation: operation/member/actual source MessageRef plus the confirmed reply anchor proving reverse ownership; separate intent/terminal evidence, never a fabricated physical output |
 | `bridge_command_operations` | Independent command identity `(pair, operation_id)` and `(pair, command_ref, kind)`; immutable typed request, scopes and attribution evidence; optional v4 source binding; null outcome means possibly invoked, not retryable |
 | `bridge_delivery_retries` | Outer payload format version **1**, typed body, exact target, media/lease set, total budget, original/scheduled time and count |
-| `bridge_legacy_delivery_evidence` | Lossless v3 mapping/media-group rows proving their one stored output and source relation, with domain refs unresolved |
+| `bridge_legacy_delivery_evidence` | Lossless v3 mapping/media-group rows proving their one stored output and source relation, with bot refs unresolved |
 | `bridge_retry_quarantine` | Lossless v3 retry row, quarantine reason, optional audited release binding; never deletes the original evidence |
 
 The schema enforces identities using unique constraints. Repository transactions
@@ -234,7 +234,7 @@ Source archive conversion is a pure consistency check, never new live admission.
 The new has_legacy_output gate checks both old normal mappings and album members
 by their original source and target fields (not by an inferred album ID). Any
 match refuses new submission, including historical unknown-topic evidence. It
-is conservative blocking, NOT a completed old-output domain binding/import.
+is conservative blocking, NOT a completed old-output bot identity binding/import.
 Missing/Unique/Ambiguous/Corrupt native resolution remains distinct. Only Created
 admission plus Created attempt permits the SDK call; no admission replay sends.
 
@@ -342,7 +342,7 @@ Definitions: `include/bridge_delivery_ledger.hpp`; repository entrypoints:
 
 ### Member mutation selection and current wiring
 
-`bridge_delivery_member_outputs` is a pure domain-codec selector for every known
+`bridge_delivery_member_outputs` is a pure bot-codec selector for every known
 confirmed output exclusively attributable to a requested source member. It
 validates complete scopes, canonical member identities, original-member
 consistency, input-block membership and all available provenance before returning
@@ -439,7 +439,7 @@ There is no implicit continuation/replay policy after partial or unknown effects
    lock/transaction, creates v4 ledger tables/guards, imports each mapping and
    media-group row losslessly, quarantines every old retry, updates the version
    and validates the shape atomically. It never calls the provider, reschedules
-   a retry, invents a target ID, parses CQ payload into domain values, or searches
+   a retry, invents a target ID, parses CQ payload into bot values, or searches
    for missing historic outputs. The API name expresses an operator precondition;
    it cannot itself discover whether an arbitrary configured DB is online.
 4. Each imported mapping/media row is a `LegacyUnknown` delivery containing exact

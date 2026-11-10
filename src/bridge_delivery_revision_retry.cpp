@@ -6,7 +6,7 @@
 #include <chrono>
 #include <exception>
 #include <set>
-#include <telegram/bot/domain_views.hpp>
+#include <telegram/bot/bot_views.hpp>
 
 namespace bridge {
 namespace {
@@ -15,11 +15,10 @@ auto document(const ledger::OpaqueValue &value, std::string_view codec)
     -> d::Json {
   if (value.codec != codec ||
       value.version != (codec == "bridge.EditIntent.cbor" ? 2 : 1) ||
-      value.bytes.empty() ||
-      value.bytes.size() > d::detail::domain_maximum_bytes)
+      value.bytes.empty() || value.bytes.size() > d::detail::bot_maximum_bytes)
     throw std::runtime_error("unsupported edit retry evidence");
   auto json = d::Json::from_cbor(value.bytes.begin(), value.bytes.end());
-  d::detail::validate_domain_wire(json);
+  d::detail::validate_bot_wire(json);
   const auto bytes = d::Json::to_cbor(json);
   if (std::string(bytes.begin(), bytes.end()) != value.bytes)
     throw std::runtime_error("noncanonical edit retry evidence");
@@ -45,7 +44,7 @@ auto restore(const ledger::RevisionSnapshot &snapshot,
       checkpoint.complete ||
       checkpoint.phase != ledger::RevisionPhase::Finished ||
       !checkpoint.outputs.empty() || checkpoint.send_attempt_ids.empty() ||
-      checkpoint.send_attempt_ids.size() > d::detail::domain_maximum_items ||
+      checkpoint.send_attempt_ids.size() > d::detail::bot_maximum_items ||
       checkpoint.send_results.size() != checkpoint.send_attempt_ids.size())
     throw std::runtime_error(
         "edit retry lacks complete zero-effect send history");

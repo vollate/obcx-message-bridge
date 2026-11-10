@@ -11,7 +11,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <telegram/bot/domain_views.hpp>
+#include <telegram/bot/bot_views.hpp>
 #include <vector>
 
 namespace bridge {

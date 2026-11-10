@@ -1,31 +1,31 @@
 // Included after the delivery/revision ledger. No provider calls or authority
 // restoration: this table records observed membership, not sent contribution.
-#include <core/bot/domain_codec.hpp>
-#include <core/bot/domain_events.hpp>
+#include <core/bot/bot_codec.hpp>
+#include <core/bot/bot_events.hpp>
 
 namespace bridge {
 namespace {
-namespace album_domain = obcx::bot;
+namespace album_bot = obcx::bot;
 template <class T>
 auto album_decode(const ledger::OpaqueValue &value, std::string_view name)
     -> T {
   if (value.codec != "obcx.bot." + std::string(name) + ".cbor" ||
       value.version != 1 || value.bytes.empty() ||
-      value.bytes.size() > album_domain::detail::domain_maximum_bytes)
+      value.bytes.size() > album_bot::detail::bot_maximum_bytes)
     throw std::runtime_error("invalid album reference encoding");
   const auto document =
-      album_domain::Json::from_cbor(value.bytes.begin(), value.bytes.end());
-  album_domain::detail::validate_domain_wire(document);
+      album_bot::Json::from_cbor(value.bytes.begin(), value.bytes.end());
+  album_bot::detail::validate_bot_wire(document);
   auto decoded = document.get<T>();
   decoded.validate();
-  const auto bytes = album_domain::Json::to_cbor(album_domain::Json(decoded));
+  const auto bytes = album_bot::Json::to_cbor(album_bot::Json(decoded));
   if (std::string(bytes.begin(), bytes.end()) != value.bytes)
     throw std::runtime_error("noncanonical album reference");
   return decoded;
 }
 void validate_album_observation(const ledger::AlbumObservation &value,
                                 const ledger::OpaqueValue &scope) {
-  std::size_t remaining = album_domain::detail::domain_maximum_bytes;
+  std::size_t remaining = album_bot::detail::bot_maximum_bytes;
   for (const auto *field :
        {&value.event_id, &value.correlation_id, &value.source_bot}) {
     if (field->size() > remaining)
@@ -33,18 +33,17 @@ void validate_album_observation(const ledger::AlbumObservation &value,
     remaining -= field->size();
   }
   const auto source =
-      album_decode<album_domain::ConversationRef>(scope, "ConversationRef");
+      album_decode<album_bot::ConversationRef>(scope, "ConversationRef");
   const auto message =
-      album_decode<album_domain::MessageRef>(value.message_ref, "MessageRef");
-  const auto group = album_decode<album_domain::MediaGroupRef>(
+      album_decode<album_bot::MessageRef>(value.message_ref, "MessageRef");
+  const auto group = album_decode<album_bot::MediaGroupRef>(
       value.media_group_ref, "MediaGroupRef");
   if (message.conversation != source || group.conversation != source ||
-      source.installation.surface !=
-          album_domain::SurfaceId{"telegram.bot_api"} ||
+      source.installation.surface != album_bot::SurfaceId{"telegram.bot_api"} ||
       value.source_bot != source.installation.installation_id ||
       value.event_id.empty())
     throw std::runtime_error("album observation scope or source mismatch");
-  album_domain::detail::validate_domain_wire(Json(value));
+  album_bot::detail::validate_bot_wire(Json(value));
 }
 void validate_album_admission_observations(
     const ledger::Admission &admission,
@@ -52,12 +51,12 @@ void validate_album_admission_observations(
   const auto &encoded = admission.policy_and_limits;
   if (encoded.codec != "obcx.bot.BridgeDeliveryPolicy.cbor" ||
       encoded.version != 2 || encoded.bytes.empty() ||
-      encoded.bytes.size() > album_domain::detail::domain_maximum_bytes ||
+      encoded.bytes.size() > album_bot::detail::bot_maximum_bytes ||
       observations.size() != admission.members.size())
     throw std::runtime_error("invalid album admission observation envelope");
   const auto policy =
       Json::from_cbor(encoded.bytes.begin(), encoded.bytes.end());
-  album_domain::detail::validate_domain_wire(policy);
+  album_bot::detail::validate_bot_wire(policy);
   const auto bytes = Json::to_cbor(policy);
   if (std::string(bytes.begin(), bytes.end()) != encoded.bytes ||
       policy.at("album_batch_policy") != "preserve-observed-batch" ||
@@ -107,13 +106,11 @@ auto album_observations(obcx::core::IDbConnection &db, const std::string &id)
                {id});
   if (totals.size() != 1 || db_int64(totals.front(), "count") < 0 ||
       db_int64(totals.front(), "count") >
-          static_cast<std::int64_t>(
-              album_domain::detail::domain_maximum_items) ||
+          static_cast<std::int64_t>(album_bot::detail::bot_maximum_items) ||
       db_int64(totals.front(), "bytes") < 0 ||
       db_int64(totals.front(), "bytes") >
-          static_cast<std::int64_t>(album_domain::detail::domain_maximum_bytes))
-    throw std::runtime_error(
-        "album association snapshot exceeds domain bounds");
+          static_cast<std::int64_t>(album_bot::detail::bot_maximum_bytes))
+    throw std::runtime_error("album association snapshot exceeds bot bounds");
   std::vector<ledger::SuppressedAlbumMember> result;
   if (db_int64(totals.front(), "count") == 0)
     return result;
@@ -123,7 +120,7 @@ auto album_observations(obcx::core::IDbConnection &db, const std::string &id)
                                   {id})) {
     const auto serialized = db_string(row, "data");
     const auto document = Json::parse(serialized);
-    album_domain::detail::validate_domain_wire(document);
+    album_bot::detail::validate_bot_wire(document);
     auto member = document.get<ledger::SuppressedAlbumMember>();
     validate_album_observation(member.observation, admission.source_scope);
     if (Json(member).dump() != serialized ||
@@ -139,8 +136,7 @@ auto album_observations(obcx::core::IDbConnection &db, const std::string &id)
         (member.observed_position == 0 &&
          member.first_observed_event_id != member.observation.event_id) ||
         member.observed_position >=
-            static_cast<std::int64_t>(
-                album_domain::detail::domain_maximum_items))
+            static_cast<std::int64_t>(album_bot::detail::bot_maximum_items))
       throw std::runtime_error("inconsistent album association row");
     const auto anchors = db.query(
         "SELECT data FROM bridge_delivery_members WHERE delivery_id=? AND "
@@ -155,10 +151,10 @@ auto album_observations(obcx::core::IDbConnection &db, const std::string &id)
     if (anchor.message_ref != member.anchor_member_ref ||
         anchor.media_group_ref !=
             std::optional{member.observation.media_group_ref} ||
-        album_decode<album_domain::MessageRef>(anchor.message_ref, "MessageRef")
+        album_decode<album_bot::MessageRef>(anchor.message_ref, "MessageRef")
                 .conversation !=
-            album_decode<album_domain::ConversationRef>(admission.source_scope,
-                                                        "ConversationRef") ||
+            album_decode<album_bot::ConversationRef>(admission.source_scope,
+                                                     "ConversationRef") ||
         !db.query("SELECT 1 FROM bridge_delivery_members WHERE pair_id=? AND "
                   "source_scope=? AND target_scope=? AND message_ref=?;",
                   {admission.pair_id, encode(admission.source_scope),
@@ -196,9 +192,9 @@ auto suppress_album_batch(
     const ledger::OpaqueValue &source, const ledger::OpaqueValue &target,
     const std::vector<ledger::AlbumObservation> &observations) -> bool {
   if (pair.empty() || observations.empty() ||
-      observations.size() > album_domain::detail::domain_maximum_items)
+      observations.size() > album_bot::detail::bot_maximum_items)
     throw std::invalid_argument("invalid observed album batch");
-  (void)album_decode<album_domain::ConversationRef>(target, "ConversationRef");
+  (void)album_decode<album_bot::ConversationRef>(target, "ConversationRef");
   std::unordered_set<std::string> seen;
   std::optional<std::pair<std::string, ledger::OpaqueValue>> selected;
   std::vector<std::size_t> unseen;

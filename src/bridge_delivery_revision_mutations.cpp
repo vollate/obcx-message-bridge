@@ -8,10 +8,10 @@ namespace {
 namespace d = obcx::bot;
 auto document(const ledger::OpaqueValue &value) -> d::Json {
   if (value.version != 1 || value.bytes.empty() ||
-      value.bytes.size() > d::detail::domain_maximum_bytes)
+      value.bytes.size() > d::detail::bot_maximum_bytes)
     throw std::runtime_error("unsupported edit predecessor operation evidence");
   auto json = d::Json::from_cbor(value.bytes.begin(), value.bytes.end());
-  d::detail::validate_domain_wire(json);
+  d::detail::validate_bot_wire(json);
   const auto canonical = d::Json::to_cbor(json);
   if (std::string(canonical.begin(), canonical.end()) != value.bytes)
     throw std::runtime_error(

@@ -2,7 +2,7 @@
 
 #include "config.hpp"
 #include <core/actor/blocking_executor.hpp>
-#include <core/bot/domain_media.hpp>
+#include <core/bot/bot_media.hpp>
 
 namespace bridge::qq {
 // Only typed QQ Voice attachments enter this path. Never sends or falls back to

@@ -3,7 +3,7 @@
 
 #include <algorithm>
 #include <common/logger.hpp>
-#include <core/bot/domain_codec.hpp>
+#include <core/bot/bot_codec.hpp>
 #include <filesystem>
 
 namespace bridge::telegram {
@@ -17,7 +17,7 @@ auto TelegramMediaProcessor::prepare_animation(obcx::bot::ReceivedMedia media,
       obcx::telegram::bot::sticker_view(media))
     throw std::invalid_argument("typed animation observation required");
   if (!maximum_bytes || maximum_bytes > config_->qq_media_download_max_bytes ||
-      maximum_bytes > obcx::bot::detail::domain_maximum_bytes)
+      maximum_bytes > obcx::bot::detail::bot_maximum_bytes)
     throw std::invalid_argument("invalid Telegram animation byte budget");
   std::size_t prepared_bytes = 0;
   std::string fallback = "[动画暂时无法获取]";

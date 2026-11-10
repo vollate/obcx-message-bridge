@@ -12,7 +12,7 @@ Bridge can dispatch bot operations by exact installation, but the actor still pe
 - Preserve the current one-write direct-mapping owner, typed bot-operation boundary, finite retry policy, media conversion behavior, raw ingress, and Message Store schema.
 - Keep the existing scalar installation fields and pair-less mappings as a single-pair compatibility form; reject mixing legacy and named-pair forms, and require explicit pair references once more than one pair is configured.
 - **BREAKING**: deployments enabling multiple pairs must add pair identifiers to mappings, scope command routes to every intended source bot, and migrate Bridge-owned persistent state before the candidate generation can activate.
-- Do not add new providers/actions, fan-out routing, an outbox, outcome reconciliation, a blob gateway, or a universal ingress/domain model.
+- Do not add new providers/actions, fan-out routing, an outbox, outcome reconciliation, a blob gateway, or a universal ingress/bot model.
 
 ## Capabilities
 

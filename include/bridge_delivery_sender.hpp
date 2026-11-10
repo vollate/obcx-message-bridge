@@ -6,11 +6,11 @@
 #include <core/actor/actor_event_publisher.hpp>
 #include <core/actor/blocking_executor.hpp>
 #include <core/bot/bot_client.hpp>
-#include <core/bot/domain_events.hpp>
+#include <core/bot/bot_events.hpp>
 #include <memory>
 #include <onebot11/bot/types.hpp>
 #include <stdexcept>
-#include <telegram/bot/domain_operations.hpp>
+#include <telegram/bot/bot_operations.hpp>
 #include <utility>
 
 namespace bridge {

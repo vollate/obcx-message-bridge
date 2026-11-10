@@ -28,7 +28,7 @@ template <typename T>
 auto command_value(std::string_view type, const T &value)
     -> ledger::OpaqueValue {
   const obcx::bot::Json document = value;
-  obcx::bot::detail::validate_domain_wire(document);
+  obcx::bot::detail::validate_bot_wire(document);
   const auto bytes = obcx::bot::Json::to_cbor(document);
   return {"obcx.bot." + std::string{type} + ".cbor", 1,
           std::string(bytes.begin(), bytes.end())};
