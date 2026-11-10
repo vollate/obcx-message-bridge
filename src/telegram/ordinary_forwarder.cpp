@@ -4,6 +4,7 @@
 #include "bridge_media_reader.hpp"
 #include "bridge_state_repository.hpp"
 #include "telegram/media_processor.hpp"
+#include <common/logger.hpp>
 #include <telegram/bot/domain_views.hpp>
 
 #include <algorithm>
@@ -344,7 +345,8 @@ auto OrdinaryForwarder::forward(
   }
   const auto target = route.target;
   auto prepared = co_await prepare_member(stored, std::move(*resolved),
-                                          "source", true, false, false, limits);
+                                          "source", true, false, false, limits,
+                                          AttachmentFailurePolicy::FailClosed);
   if (prepared.body.empty())
     co_return result;
   BridgeDeliveryRequest request{
@@ -403,9 +405,14 @@ void OrdinaryForwarder::check_media_capabilities(
 auto OrdinaryForwarder::prepare_member(
     const obcx::message_store::events::MessageStored &stored,
     ResolvedSource resolved, std::string member_id, bool include_context,
-    bool defer_captions, bool allow_edit_marker, domain::SendLimits limits)
+    bool defer_captions, bool allow_edit_marker, domain::SendLimits limits,
+    AttachmentFailurePolicy attachment_failure_policy)
     -> boost::asio::awaitable<PreparedMember> {
   limits.validate();
+  if (attachment_failure_policy == AttachmentFailurePolicy::OmitUnavailable &&
+      (!defer_captions || !stored.message.media_group))
+    throw std::invalid_argument(
+        "attachment omission requires album membership and retained captions");
   domain::OperationCorrelation{member_id}.validate();
   if (!accepts_body(stored.message, allow_edit_marker))
     throw std::invalid_argument("unsupported Telegram preparation content");
@@ -494,7 +501,8 @@ auto OrdinaryForwarder::prepare_member(
       const bool text_only_sticker =
           sticker &&
           sticker->format == obcx::telegram::bot::StickerFormat::AnimatedTgs;
-      if (!remaining && !text_only_sticker)
+      if (!remaining && !text_only_sticker &&
+          attachment_failure_policy == AttachmentFailurePolicy::FailClosed)
         throw std::runtime_error("Telegram media total byte budget exhausted");
       if (sticker) {
         auto prepared = co_await media_processor_->prepare_sticker(
@@ -517,9 +525,61 @@ auto OrdinaryForwarder::prepare_member(
       // Ask the typed extension to identify video-notes. Bridge deliberately
       // chooses ordinary Video presentation, as its predecessor did.
       const auto video_note = obcx::telegram::bot::video_note_view(media);
-      auto data = co_await read_bridge_attachment(
-          gateway_, video_note ? *video_note : media,
-          std::min(limits.maximum_media_item_bytes, remaining));
+      const auto budget = std::min(limits.maximum_media_item_bytes, remaining);
+      domain::BytesSource data;
+      try {
+        // Album-only early rejection uses the original declared size. It does
+        // not assert a cloud getFile limit or change ordinary/edit policy.
+        if (attachment_failure_policy ==
+                AttachmentFailurePolicy::OmitUnavailable &&
+            (!budget || (media.metadata.size_bytes &&
+                         *media.metadata.size_bytes > budget)))
+          throw BridgeBotOperationFailure(
+              {.code = domain::BotOperationErrorCode::MediaTooLarge,
+               .message = "album attachment exceeds bridge byte budget",
+               .retryable = false,
+               .submission_safety =
+                   domain::SubmissionSafety::DefinitelyNotSubmitted});
+        data = co_await read_bridge_attachment(
+            gateway_, video_note ? *video_note : media, budget);
+      } catch (const BridgeBotOperationFailure &failure) {
+        const auto &error = failure.error();
+        error.validate();
+        // Only acquisition failures for this attachment are recoverable.
+        // Cancellation, retired origin/route, malformed identity/evidence and
+        // all untyped errors escape. No send/persistence is inside this catch.
+        const bool unavailable =
+            error.code == domain::BotOperationErrorCode::MediaTooLarge ||
+            error.code == domain::BotOperationErrorCode::ProviderRejected ||
+            error.code == domain::BotOperationErrorCode::TransportFailure;
+        if (attachment_failure_policy !=
+                AttachmentFailurePolicy::OmitUnavailable ||
+            !unavailable ||
+            error.submission_safety !=
+                domain::SubmissionSafety::DefinitelyNotSubmitted)
+          throw;
+        // Numeric status only: native prose/locators may contain credentials.
+        const auto provider_code =
+            error.provider_code && error.provider_code->size() <= 3 &&
+                    std::ranges::all_of(
+                        *error.provider_code,
+                        [](unsigned char c) { return c >= '0' && c <= '9'; })
+                ? *error.provider_code
+                : "unavailable";
+        OBCX_WARN("Telegram album attachment omitted: member={} block={} "
+                  "kind={} declared_bytes={} budget={} error={} "
+                  "provider_code={} retryable={}; original membership and "
+                  "captions retained; continuing combined delivery",
+                  member_id, index, static_cast<unsigned>(media.kind),
+                  media.metadata.size_bytes
+                      ? std::to_string(*media.metadata.size_bytes)
+                      : "unknown",
+                  budget, domain::error_code_id(error.code), provider_code,
+                  error.retryable);
+        // Input registration and deferred caption preparation precede the
+        // read. Do not fabricate a media output or its contribution.
+        continue;
+      }
       bytes += data.bytes.size();
       switch (media.kind) {
       case domain::MediaKind::Image:

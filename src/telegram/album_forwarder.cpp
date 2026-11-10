@@ -157,10 +157,10 @@ auto OrdinaryForwarder::forward_album(
     const auto remaining = limits.maximum_media_total_bytes - bytes;
     const domain::SendLimits member_limits{
         1, std::min(limits.maximum_media_item_bytes, remaining), remaining};
-    auto prepared =
-        co_await prepare_member(stored[index], std::move(sources[index]),
-                                "member:" + std::to_string(position),
-                                position == 0, true, false, member_limits);
+    auto prepared = co_await prepare_member(
+        stored[index], std::move(sources[index]),
+        "member:" + std::to_string(position), position == 0, true, false,
+        member_limits, AttachmentFailurePolicy::OmitUnavailable);
     if (prepared.prepared_bytes > remaining)
       throw std::runtime_error("album preparation exceeded total byte budget");
     bytes += prepared.prepared_bytes;

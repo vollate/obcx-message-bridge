@@ -26,6 +26,8 @@ add_library(
   qq/handler.cpp
   qq/text_forwarder.cpp
   qq/image_preparer.cpp
+  qq/voice_preparer.cpp
+  qq/voice_normalizer.cpp
   qq/forward_preparer.cpp
   # QQ ordinary forwarding is owned by TextForwarder and its typed preparers.
   # miniapp.cpp implements the still-active CardFormatter, not QQMediaProcessor.
@@ -46,3 +48,9 @@ add_library(
   telegram/command_facade.cpp)
 
 obcx_package_target(bridge_core ROLE implementation)
+
+# Include decoder objects in the actor's implementation archive: no runtime
+# shared-library lookup or external SILK executable is required.
+target_sources(bridge_core PRIVATE $<TARGET_OBJECTS:bridge_silk>)
+target_include_directories(bridge_core PRIVATE
+  ../third_party/silk/interface ../third_party/silk/src)

@@ -1,6 +1,7 @@
 #include "qq/forward_preparer.hpp"
 #include "bridge_bot_failures.hpp"
 #include "bridge_media_reader.hpp"
+#include "qq/voice_preparer.hpp"
 
 #include <algorithm>
 #include <array>
@@ -236,6 +237,10 @@ auto prepare_forward(std::shared_ptr<d::BotOperationGateway> gateway,
       throw std::runtime_error("forward attachment byte budget exhausted");
     auto source = co_await read_bridge_attachment(
         gateway, media, std::min(limits.maximum_media_item_bytes, remaining));
+    if (media.kind == d::MediaKind::Voice)
+      source = co_await prepare_voice(
+          blocking, config, std::move(source),
+          std::min(limits.maximum_media_item_bytes, remaining));
     bytes += source.bytes.size();
     auto caption = display_text(media.caption);
     if (!caption.empty())

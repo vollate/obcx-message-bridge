@@ -9,12 +9,16 @@ if(NOT DEFINED OBCX_CURRENT_PACKAGE)
 endif()
 include_directories(include)
 
+add_subdirectory(third_party/silk)
 add_subdirectory(src)
 
 obcx_add_actor(SOURCES actor/bridge_actor.cpp)
 target_link_libraries(bridge_actor PRIVATE bridge_core)
 install(TARGETS bridge_actor LIBRARY DESTINATION lib/obcx/actors)
 install(FILES package.toml DESTINATION share/obcx/packages/vollate.bridge)
+install(FILES third_party/silk/LICENSE
+        DESTINATION share/obcx/packages/vollate.bridge/licenses
+        RENAME SILK-SDK.txt)
 install(FILES licenses/Unicode-3.0.txt
         DESTINATION share/obcx/packages/vollate.bridge/licenses)
 target_include_directories(bridge_actor

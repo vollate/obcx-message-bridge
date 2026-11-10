@@ -13,7 +13,7 @@
 namespace bridge {
 namespace {
 
-constexpr std::size_t kMaxQqMediaDownloadBytes = 10U * 1024U * 1024U;
+constexpr std::size_t kMaxQqMediaDownloadBytes = 20U * 1024U * 1024U;
 
 template <typename T>
 void assign_if_present(const obcx::common::ActorConfigView &view,
@@ -586,7 +586,7 @@ void validate_bridge_config(const BridgeConfig &config) {
   if (config.qq_media_download_max_bytes == 0 ||
       config.qq_media_download_max_bytes > kMaxQqMediaDownloadBytes) {
     throw std::runtime_error(
-        "bridge qq_media_download_max_bytes must be between 1 and 10485760");
+        "bridge qq_media_download_max_bytes must be between 1 and 20971520");
   }
 }
 

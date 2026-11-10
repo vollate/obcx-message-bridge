@@ -69,10 +69,14 @@ private:
   // Restoration never replaces the original observation used for acquisition.
   auto resolve_source(const obcx::message_store::events::MessageStored &stored)
       const -> std::optional<ResolvedSource>;
+  // Ordinary messages/edits remain strict. Albums retain failed inputs and
+  // captions but may omit unavailable attachments, matching the predecessor.
+  enum class AttachmentFailurePolicy { FailClosed, OmitUnavailable };
   auto prepare_member(const obcx::message_store::events::MessageStored &stored,
                       ResolvedSource resolved, std::string member_id,
                       bool include_context, bool defer_captions,
-                      bool allow_edit_marker, obcx::bot::SendLimits limits)
+                      bool allow_edit_marker, obcx::bot::SendLimits limits,
+                      AttachmentFailurePolicy attachment_failure_policy)
       -> boost::asio::awaitable<PreparedMember>;
   // Only exact SDK markers paired with their original typed media are handled.
   // Unknown markers and detached/contradictory special-media markers fail

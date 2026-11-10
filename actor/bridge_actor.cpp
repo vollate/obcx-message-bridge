@@ -8,6 +8,7 @@
 #include "config.hpp"
 #include "core/actor/command_scope.hpp"
 #include "core/bot/typed_operation.hpp"
+#include "qq/voice_normalizer.hpp"
 #include "received_message_repository.hpp"
 
 #include <common/json_utils.hpp>
@@ -532,6 +533,12 @@ auto BridgeActor::handle(
                                                   error.what(), true);
     result.emit(build_failed_event(message, "bridge_retry_unavailable",
                                    error.what(), true));
+    co_return result;
+  } catch (const qq::VoicePreparationFailure &error) {
+    auto result = obcx::core::ActorResult::failed(
+        "bridge_voice_preparation_failed", error.what(), false);
+    result.emit(build_failed_event(message, "bridge_voice_preparation_failed",
+                                   error.what(), false));
     co_return result;
   } catch (const std::exception &error) {
     // An unclassified exception may follow durable attempt admission or a

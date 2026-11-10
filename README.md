@@ -210,7 +210,7 @@ gif_max_duration = 5
 gif_max_fps = 0
 gif_max_width = 0
 gif_max_colors = 256
-qq_media_download_max_bytes = 10485760
+qq_media_download_max_bytes = 20971520
 image_placeholder_url = "https://placehold.co/512x512/e9ecef/495057/png?text=NOT+FOUND"
 
 [[actors.bridge.config.installation_pairs]]
@@ -237,11 +237,13 @@ inputs. Already cached Telegram sticker file IDs can still be reused without a
 new image lookup. URL generation remains LLOneBot's responsibility; Bridge does
 not implement a key API or assume a fixed URL lifetime.
 
-`qq_media_download_max_bytes` bounds each full QQ image downloaded after
-Telegram rejects direct URL delivery, and also bounds probe responses when a
-server ignores Range. Probe/GIF acquisition explicitly uses
-`image_url_probe_timeout_ms`. Configure the byte limit in the range
-`1..10485760`; 10 MiB is the public Telegram photo limit. A failed, expired,
+`qq_media_download_max_bytes` bounds each Telegram attachment read for QQ
+forwarding, each full QQ image downloaded after Telegram rejects direct URL
+delivery, and probe responses when a server ignores Range. Probe/GIF acquisition
+explicitly uses `image_url_probe_timeout_ms`. Configure the byte limit explicitly
+in the range `1..20971520` (up to 20 MiB). Provider limits still apply independently;
+raising this read budget does not raise Telegram's 10 MiB photo upload limit.
+A failed, expired,
 invalid, or oversized item is replaced during multipart fallback without
 discarding valid peers in the same media group.
 

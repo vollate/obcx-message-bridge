@@ -228,9 +228,9 @@ auto OrdinaryForwarder::prepare_edit(
                   ? domain::detail::domain_maximum_bytes
                   : media_count * item};
   }
-  auto prepared =
-      co_await prepare_member(stored, std::move(*resolved), member->member_id,
-                              true, false, true, limits);
+  auto prepared = co_await prepare_member(
+      stored, std::move(*resolved), member->member_id, true, false, true,
+      limits, AttachmentFailurePolicy::FailClosed);
   if (prepared.body.empty())
     throw std::runtime_error("edited source prepared no outbound content");
   BridgeDeliveryRequest request{

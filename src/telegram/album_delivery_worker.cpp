@@ -1,4 +1,5 @@
 #include "telegram/album_delivery_worker.hpp"
+#include "bridge_bot_failures.hpp"
 #include "bridge_command_operations.hpp"
 #include <common/logger.hpp>
 #include <exception>
@@ -76,9 +77,30 @@ void AlbumDeliveryWorker::enqueue(BufferedTelegramMessage message) {
         Lifecycle::spawn_owned(
             self->executor_, lease, flush(self, std::move(messages), token),
             [self](std::exception_ptr error) {
-              if (error)
-                warn_retained("Typed album flush failed; no legacy fallback or "
-                              "send replay");
+              if (!error)
+                return;
+              try {
+                std::rethrow_exception(error);
+              } catch (const std::exception &cause) {
+                try {
+                  // Never emit arbitrary exception/provider prose: it may
+                  // contain locators or credentials. Acquisition omissions
+                  // have their own bounded member-level diagnostic.
+                  const auto *typed =
+                      dynamic_cast<const BridgeBotOperationFailure *>(&cause);
+                  OBCX_WARN("Telegram album forwarding failed: error={}; "
+                            "batch will not be automatically replayed",
+                            typed
+                                ? obcx::bot::error_code_id(typed->error().code)
+                                : "unclassified_exception");
+                } catch (...) {
+                  // Diagnostics must not escape the completion handler.
+                }
+              } catch (...) {
+                warn_retained("Telegram album forwarding failed: unknown "
+                              "exception; batch will not be automatically "
+                              "replayed");
+              }
             },
             boost::asio::cancellation_slot{});
       },

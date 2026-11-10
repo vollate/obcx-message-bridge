@@ -1,0 +1,73 @@
+--- a/src/SKP_Silk_range_coder.c
++++ b/src/SKP_Silk_range_coder.c
+@@ -202,17 +202,25 @@
+             /* Update base */
+             base_Q32 = SKP_LSHIFT_uint( base_Q32, 8 );
+             /* Make sure not to read beyond buffer */
+-            if( bufferIx < psRC->bufferLength ) {
+-                /* Read one byte from buffer */
+-                base_Q32 |= (SKP_uint32)buffer[ bufferIx++ ];
++            if (bufferIx < psRC->bufferLength) {
++              /* The pointer skips the four initial bytes. Supply virtual
++                 zero lookahead after the payload, but preserve bufferIx for
++                 range_coder_get_length and the final termination check. */
++              if (bufferIx < psRC->bufferLength - 4) {
++                base_Q32 |= (SKP_uint32)buffer[bufferIx];
++              }
++              bufferIx++;
+             }
+         }
+         /* Update base */
+         base_Q32 = SKP_LSHIFT_uint( base_Q32, 8 );
+         /* Make sure not to read beyond buffer */
+         if( bufferIx < psRC->bufferLength ) {
+-            /* Read one byte from buffer */
+-            base_Q32 |= (SKP_uint32)buffer[ bufferIx++ ];
++          /* Same bounded payload read / virtual zero lookahead as above. */
++          if (bufferIx < psRC->bufferLength - 4) {
++            base_Q32 |= (SKP_uint32)buffer[bufferIx];
++          }
++          bufferIx++;
+         }
+     }
+ 
+@@ -265,23 +273,22 @@
+     const SKP_int32                 bufferLength        /* I    buffer length (in bytes)                    */
+ )
+ {
+-    /* check input */
+-    if( ( bufferLength > MAX_ARITHM_BYTES ) || ( bufferLength < 0 ) ) {
+-        psRC->error = RANGE_CODER_DEC_PAYLOAD_TOO_LONG;
+-        return;
+-    }
+-    /* Initialize structure */
+-    /* Copy to internal buffer */
+-    SKP_memcpy( psRC->buffer, buffer, bufferLength * sizeof( SKP_uint8 ) ); 
+-    psRC->bufferLength = bufferLength;
+-    psRC->bufferIx = 0;
+-    psRC->base_Q32 = 
+-        SKP_LSHIFT_uint( (SKP_uint32)buffer[ 0 ], 24 ) | 
+-        SKP_LSHIFT_uint( (SKP_uint32)buffer[ 1 ], 16 ) | 
+-        SKP_LSHIFT_uint( (SKP_uint32)buffer[ 2 ],  8 ) | 
+-                         (SKP_uint32)buffer[ 3 ];
+-    psRC->range_Q16 = 0x0000FFFF;
+-    psRC->error     = 0;
++  /* Four bytes are required to initialize base_Q32 below. */
++  if ((bufferLength > MAX_ARITHM_BYTES) || (bufferLength < 4)) {
++    psRC->error = RANGE_CODER_DEC_PAYLOAD_TOO_LONG;
++    return;
++  }
++  /* Initialize structure */
++  /* Copy to internal buffer */
++  SKP_memcpy(psRC->buffer, buffer, bufferLength * sizeof(SKP_uint8));
++  psRC->bufferLength = bufferLength;
++  psRC->bufferIx = 0;
++  psRC->base_Q32 = SKP_LSHIFT_uint((SKP_uint32)buffer[0], 24) |
++                   SKP_LSHIFT_uint((SKP_uint32)buffer[1], 16) |
++                   SKP_LSHIFT_uint((SKP_uint32)buffer[2], 8) |
++                   (SKP_uint32)buffer[3];
++  psRC->range_Q16 = 0x0000FFFF;
++  psRC->error = 0;
+ }
+ 
+ /* Determine length of bitstream */

@@ -28,6 +28,14 @@ Use a frozen matching SDK/core >=2.7.0,<3.0.0 and scripts/actor_build.py, not ac
 targets in the live core workspace. See core packaging/actors/domain-sdk-cutover.md
 for offline CLI, backup/rollback boundaries and operator-owned runtime acceptance.
 
+## QQ voice preparation
+
+Ordinary and merged-forward QQ Voice attachments now share queued SILK decoding,
+Ogg/Opus conversion and full output validation before delivery. Failures stop
+before upload; music/files and TG → QQ remain unchanged. See
+[QQ voice preparation](qq-voice-preparation.md) for runtime requirements,
+resource/cancellation behavior, packaging and decoder license details.
+
 ## Current-only SDK transition
 
 The operator has withdrawn legacy support; core's `legacy-removal` change

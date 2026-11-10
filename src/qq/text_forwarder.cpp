@@ -6,6 +6,7 @@
 #include "qq/card_formatter.hpp"
 #include "qq/forward_preparer.hpp"
 #include "qq/image_preparer.hpp"
+#include "qq/voice_preparer.hpp"
 #include <map>
 #include <onebot11/bot/presentation_observation.hpp>
 #include <onebot11/bot/special_content.hpp>
@@ -651,6 +652,10 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
                         " bytes)]\n❌ 无法读取文件");
             outgoing.emplace_back(std::move(caption));
           } else {
+            if (media.kind == domain::MediaKind::Voice)
+              source = co_await prepare_voice(
+                  blocking_, config_, std::move(*source),
+                  std::min(limits.maximum_media_item_bytes, remaining));
             bytes += source->bytes.size();
             switch (media.kind) {
             case domain::MediaKind::Video:
