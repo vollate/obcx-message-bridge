@@ -171,7 +171,10 @@ mode = "await"
 name = "forward"
 actor = "bridge"
 input = "obcx::message_store::events::MessageStored"
-output = ["bridge::events::MessageForwarded", "bridge::events::MessageForwardFailed"]
+output = [
+  "bridge::events::MessageForwarded",
+  "bridge::events::MessageForwardFailed",
+]
 after = ["persist"]
 mode = "await"
 
