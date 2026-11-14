@@ -14,9 +14,6 @@ dependencies = { "libraries" = [
   { "id" = "obcx-sdk", "version" = ">=2.7.0,<3.0.0", "targets" = [
     "obcx::obcx_core",
   ], "visibility" = "private" },
-  { "id" = "tomlplusplus", "version" = ">=3.4.0,<4.0.0", "targets" = [
-    "tomlplusplus::tomlplusplus",
-  ], "visibility" = "private" },
 ] }
 test_dependencies = { "libraries" = [], "system" = [] }
 compatibility = { "cpp_standard" = 26, "compiler" = { "id" = "GNU", "version" = ">=16.1.0" }, "stdlib" = "libstdc++", "cxx11_abi" = 1, "pic" = true, "obcx" = ">=2.7.0,<3.0.0", "actor_abi_min" = 2, "actor_abi_max" = 2, "reflection_macro" = 202506 }
