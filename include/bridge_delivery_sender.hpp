@@ -255,7 +255,7 @@ auto propagate_bridge_recall(
     std::shared_ptr<BridgeCommandOperations> operations,
     std::shared_ptr<BridgeStateRepository> repository,
     std::shared_ptr<obcx::core::BlockingExecutor> blocking,
-    obcx::bot::MessageDeleted deleted, bool delete_outputs,
+    obcx::bot::MessageDeleted deleted, bool source_has_image,
     obcx::telegram::bot::FormattedText replacement)
     -> boost::asio::awaitable<std::optional<BridgeRecallPropagationResult>>;
 

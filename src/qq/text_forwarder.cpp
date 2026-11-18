@@ -43,6 +43,14 @@ auto is_card_category(std::string_view category) -> bool {
          category == "onebot11.share";
 }
 
+auto face_caption_bytes(const bot::RichText &text) -> std::size_t {
+  // Face labels and the sender prefix are already rendered as literals.
+  std::size_t bytes = 0;
+  for (const auto &part : text)
+    bytes += std::get<bot::Text>(part).content.size();
+  return bytes;
+}
+
 auto is_presentation_category(std::string_view category) -> bool {
   return category == "onebot11.music" || category == "onebot11.node";
 }
@@ -322,6 +330,7 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
         return unsupported && unsupported->category == "onebot11.forward";
       });
   std::map<std::size_t, std::string> display_literals;
+  std::map<std::size_t, std::string> image_face_fallbacks;
   // Market faces without a readable image are dropped, never sent as text.
   std::set<std::size_t> omitted_market_faces;
   bool has_special_display = false;
@@ -370,7 +379,11 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
         throw std::runtime_error("QQ presentation lacks original observation");
     }
   }
-  if (has_forward || has_special_display) {
+  const auto has_face_observation =
+      std::ranges::any_of(stored.message.observations, [](const auto &item) {
+        return std::holds_alternative<bot::ReceivedFace>(item.value);
+      });
+  if (has_forward || has_special_display || has_face_observation) {
     CardFormatter cards{config_};
     for (const auto &view :
          obcx::onebot11::bot::special_content(stored.message)) {
@@ -393,11 +406,20 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
         if (view.source != stored.message.message ||
             index >= stored.message.body.size())
           throw std::runtime_error("face view source mismatch");
-        const auto *unsupported =
-            std::get_if<bot::UnsupportedContent>(&stored.message.body[index]);
+        const auto &block = stored.message.body[index];
+        // Unknown catalog faces can already be projected as display text.
+        if (std::holds_alternative<bot::ReceivedRichText>(block))
+          continue;
+        const auto fallback = "[QQ表情:" + face->id + "]";
+        if (const auto *media = std::get_if<bot::ReceivedMedia>(&block);
+            media && media->kind == bot::MediaKind::Image) {
+          if (!image_face_fallbacks.emplace(index, fallback).second)
+            throw std::runtime_error("duplicate face image view");
+          continue;
+        }
+        const auto *unsupported = std::get_if<bot::UnsupportedContent>(&block);
         if (!unsupported || unsupported->category != "onebot11.face" ||
-            !display_literals.emplace(index, "[QQ表情:" + face->id + "]")
-                 .second)
+            !display_literals.emplace(index, fallback).second)
           throw std::runtime_error("face view projection mismatch");
       } else if (const auto *face =
                      std::get_if<obcx::onebot11::bot::MarketFaceView>(
@@ -461,6 +483,10 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
     if (const auto *media =
             std::get_if<bot::ReceivedMedia>(&stored.message.body[i])) {
       ++media_count;
+      // A face has its own caption and a text-only fallback, not a photo
+      // placeholder. Keep it out of the ordinary photo preparation batch.
+      if (image_face_fallbacks.contains(i))
+        continue;
       has_market_face =
           has_market_face ||
           obcx::onebot11::bot::market_face_view(*media).has_value();
@@ -476,9 +502,11 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
       photo_indices.push_back(i);
     }
   }
-  // Market-face captions belong to that image, not to unrelated album items.
-  // The shared preparer inspects owned bytes to preserve GIF motion; the SDK
-  // image-family observation itself does not assert an animation encoding.
+  // Face captions belong to that image, not to unrelated album items.
+  // Image-backed ordinary faces were excluded from photo_refs above; process
+  // them and any text alongside them in source order, without copying the
+  // text into multiple photo batches. The shared preparer still preserves
+  // GIF motion for market faces and ordinary images.
   const bool mixed_media =
       has_forward || has_market_face || media_count != photo_refs.size();
   bot::SendLimits limits{1, 0, 0};
@@ -537,6 +565,7 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
   std::vector<std::optional<std::vector<ledger::Provenance>>> block_origins;
   std::optional<bot::MessageRef> reply;
   bool reply_resolved = false;
+  std::size_t extra_face_messages = 0;
   if (mixed_media) {
     // Mixed attachments retain source order: never gather images across a
     // voice/video/file into an album or move unrelated text into its caption.
@@ -593,6 +622,53 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
           block_origins.emplace_back(contribution);
         }
         continue;
+      } else if (const auto face = image_face_fallbacks.find(index);
+                 face != image_face_fallbacks.end()) {
+        const auto &media =
+            std::get<bot::ReceivedMedia>(stored.message.body[index]);
+        std::optional<bot::BytesSource> source;
+        const auto maximum = std::min(limits.maximum_media_item_bytes,
+                                      limits.maximum_media_total_bytes - bytes);
+        if (maximum) {
+          try {
+            source = co_await read_bridge_attachment(gateway_, media, maximum);
+          } catch (const BridgeBotOperationFailure &failure) {
+            if (failure.error().code == bot::BotOperationErrorCode::Cancelled)
+              throw;
+            // Fall back before any send, never to a second image or a URL.
+          }
+        }
+        if (source) {
+          // The face description is alt text for consumers such as Persona,
+          // not user-authored chat text to repeat under the Telegram photo.
+          bot::RichText caption;
+          constexpr std::size_t caption_limit = 1024;
+          if (face_caption_bytes(body) > caption_limit) {
+            outgoing.emplace_back(std::move(body));
+            body.clear();
+            block_origins.emplace_back(origins);
+            ++extra_face_messages;
+          } else {
+            prefix(caption);
+          }
+          const bool animated = source->metadata.mime_type == "image/gif";
+          if (!source->metadata.filename)
+            source->metadata.filename =
+                animated ? "qq-face.gif" : "qq-face.png";
+          bytes += source->bytes.size();
+          if (animated)
+            outgoing.emplace_back(
+                bot::Animation{std::move(*source), std::move(caption)});
+          else
+            outgoing.emplace_back(
+                bot::Image{std::move(*source), std::move(caption)});
+        } else {
+          auto caption = co_await render_text(media.caption, route);
+          if (caption.empty())
+            caption.emplace_back(bot::Text{face->second, {}});
+          prefix(caption);
+          outgoing.emplace_back(std::move(caption));
+        }
       } else {
         const auto *observed_media =
             std::get_if<bot::ReceivedMedia>(&stored.message.body[index]);
@@ -827,6 +903,10 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
   // number of actually prepared blocks. Long text/captions are not truncated.
   if (has_forward)
     limits.maximum_messages = outgoing.size();
+  else
+    limits.maximum_messages =
+        std::min(bot::detail::bot_maximum_items,
+                 limits.maximum_messages + extra_face_messages);
   if (stored.message.reply && !reply_resolved) {
     reply = co_await blocking_->run([repository = repository_, pair = pair_id_,
                                      target = route.target,

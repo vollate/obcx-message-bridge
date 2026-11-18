@@ -109,9 +109,8 @@ auto TelegramCommandHandler::handle_recall_command(
   try {
     validate_source(source);
     if (!source.received.reply || !source.received.reply->reference()) {
-      co_await send_reply_message(
-          source.received.message,
-          "⚠️ 请回复一条消息后使用 /recall 命令来撤回对应的QQ消息");
+      co_await send_reply_message(source.received.message,
+                                  "请回复要撤回的那条消息，再发送 /recall");
       co_return;
     }
     if (state_repository_) {
@@ -129,8 +128,9 @@ auto TelegramCommandHandler::handle_recall_command(
         unresolved = true;
       }
       if (unresolved) {
-        co_await send_reply_message(source.received.message,
-                                    "❌ 撤回未完成或结果不确定；不会自动重试");
+        co_await send_reply_message(
+            source.received.message,
+            "没能确认消息是否已撤回 请先到 QQ 群里看一下，机器人不会自动重试");
         co_return;
       }
       if (recalled) {
@@ -139,9 +139,10 @@ auto TelegramCommandHandler::handle_recall_command(
         // an unattempted suffix or emit another success/feedback message.
         if (recalled->replayed)
           co_return;
+        bool clean_up = false;
         std::string feedback;
         if (recalled->targets.empty()) {
-          feedback = "❌ 没有可证实、可单独撤回的QQ消息";
+          feedback = "找不到可以单独撤回的 QQ 消息";
         } else {
           std::size_t confirmed = 0, failed = 0, unknown = 0, uncalled = 0;
           bool persisted = true;
@@ -163,26 +164,69 @@ auto TelegramCommandHandler::handle_recall_command(
           }
           if (!recalled->interrupted && persisted &&
               confirmed == recalled->targets.size()) {
-            feedback = recalled->original_source
-                           ? "✅ 已撤回QQ原消息；转发副本可能仍存在"
-                           : "✅ 已撤回 " + std::to_string(confirmed) +
-                                 " 条已知QQ输出";
+            clean_up = true;
+            feedback =
+                recalled->original_source
+                    ? "已撤回 QQ 原消息"
+                    : "✅ 已撤回 " + std::to_string(confirmed) + " 条 QQ 消息";
           } else {
-            feedback = "⚠️ 本次撤回：已确认 " + std::to_string(confirmed) +
-                       "，失败 " + std::to_string(failed) + "，未知 " +
-                       std::to_string(unknown) + "，未调用 " +
-                       std::to_string(uncalled) +
-                       "。未自动重试；未落库的结果不能视为安全重试。";
+            if (recalled->targets.size() == 1) {
+              if (failed)
+                feedback = "没能撤回这条 QQ 消息";
+              else if (unknown)
+                feedback = "暂时无法确认这条 QQ 消息是否已撤回";
+              else if (uncalled)
+                feedback = "没有发出撤回请求";
+              else
+                feedback = "QQ 已确认撤回这条消息";
+            } else {
+              if (confirmed)
+                feedback +=
+                    "已撤回 " + std::to_string(confirmed) + " 条 QQ 消息";
+              if (failed)
+                feedback += "有 " + std::to_string(failed) + " 条没能撤回";
+              if (unknown)
+                feedback += "有 " + std::to_string(unknown) +
+                            " 条暂时无法确认是否已撤回";
+              if (uncalled)
+                feedback +=
+                    "有 " + std::to_string(uncalled) + " 条没有发出撤回请求";
+            }
+            if (unknown || !persisted)
+              feedback += "请先到 QQ 群里核实，不要重复发送 /recall";
           }
         }
+        // Publish the status first. If sending fails or times out, preserve
+        // both messages. Never run cleanup on a replay or partial QQ recall.
         co_await send_reply_message(source.received.message,
                                     std::move(feedback));
+        if (clean_up) {
+          const auto &command = source.received.message;
+          const auto &reply = *source.received.reply;
+          const auto &original = reply.reference()->target();
+          if (reply.source() != command ||
+              original.conversation != command.conversation ||
+              original == command)
+            throw std::logic_error("recall cleanup reply scope mismatch");
+          for (const auto *message : {&original, &command}) {
+            const auto removed =
+                co_await operations_->delete_telegram_output(*message);
+            if (!removed.ok() || removed.value->message != *message) {
+              if (removed.error &&
+                  removed.error->code ==
+                      obcx::bot::BotOperationErrorCode::Cancelled)
+                throw BridgeBotOperationFailure(*removed.error);
+              OBCX_WARN("QQ recall succeeded, but Telegram did not confirm "
+                        "removal of the {}. No automatic retry.",
+                        message == &original ? "original message" : "command");
+            }
+          }
+        }
         co_return;
       }
     }
-    co_await send_reply_message(
-        source.received.message,
-        "❌ 未找到该消息的当前投递记录，不能安全撤回QQ消息");
+    co_await send_reply_message(source.received.message,
+                                "找不到这条消息在 QQ 群里对应的消息，无法撤回");
   } catch (const std::exception &error) {
     OBCX_ERROR("处理 /recall 命令时出错: {}", error.what());
     throw;

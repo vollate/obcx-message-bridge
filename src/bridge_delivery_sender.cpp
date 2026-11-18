@@ -1125,7 +1125,7 @@ auto propagate_bridge_recall(
     std::shared_ptr<BridgeCommandOperations> operations,
     std::shared_ptr<BridgeStateRepository> repository,
     std::shared_ptr<obcx::core::BlockingExecutor> blocking,
-    bot::MessageDeleted deleted, const bool delete_outputs,
+    bot::MessageDeleted deleted, const bool source_has_image,
     obcx::telegram::bot::FormattedText replacement)
     -> boost::asio::awaitable<std::optional<BridgeRecallPropagationResult>> {
   if (!operations || !repository || !blocking)
@@ -1165,6 +1165,15 @@ auto propagate_bridge_recall(
       {}, false, false, snapshot->completeness_known};
   if (outputs.empty())
     co_return result;
+  // A QQ merged forward can expand to a Telegram header and photos without
+  // any top-level image in the QQ body. Use the receipts for this member's
+  // exclusive outputs to choose one policy for the entire recall batch.
+  const bool delete_outputs =
+      source_has_image ||
+      std::ranges::any_of(outputs, [&](const auto &message) {
+        return !bridge_delivery_find_output(*snapshot, message)
+                    .reusable_media.empty();
+      });
   const auto digest = calculate_hash(
       bot::Json::array({pair, snapshot->delivery_id, deleted.message}).dump());
   if (digest.empty())
@@ -1189,11 +1198,6 @@ auto propagate_bridge_recall(
     const auto &output = bridge_delivery_find_output(*snapshot, message);
     if (!output.provenance)
       throw std::runtime_error("recall output provenance disappeared");
-    // editMessageText cannot edit an attachment/caption. Refuse a known media
-    // output before editing any text prefix; do not silently switch methods.
-    if (!delete_outputs && !output.reusable_media.empty())
-      throw std::runtime_error(
-          "Telegram media output cannot be edited as text");
     provenance.push_back(*output.provenance);
     const auto hash = calculate_hash(bot::Json(message).dump());
     if (hash.empty())
