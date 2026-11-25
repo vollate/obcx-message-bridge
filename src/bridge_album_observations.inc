@@ -39,7 +39,7 @@ void validate_album_observation(const ledger::AlbumObservation &value,
   const auto group = album_decode<album_bot::MediaGroupRef>(
       value.media_group_ref, "MediaGroupRef");
   if (message.conversation != source || group.conversation != source ||
-      source.installation.surface != album_bot::SurfaceId{"telegram.bot_api"} ||
+      source.installation.platform != album_bot::Platform::Telegram ||
       value.source_bot != source.installation.installation_id ||
       value.event_id.empty())
     throw std::runtime_error("album observation scope or source mismatch");
@@ -50,7 +50,8 @@ void validate_album_admission_observations(
     const std::vector<ledger::AlbumObservation> &observations) {
   const auto &encoded = admission.policy_and_limits;
   if (encoded.codec != "obcx.bot.BridgeDeliveryPolicy.cbor" ||
-      encoded.version != 2 || encoded.bytes.empty() ||
+      encoded.version != ledger::codec_version(encoded.codec) ||
+      encoded.bytes.empty() ||
       encoded.bytes.size() > album_bot::detail::bot_maximum_bytes ||
       observations.size() != admission.members.size())
     throw std::runtime_error("invalid album admission observation envelope");
@@ -88,11 +89,11 @@ void validate_album_admission_observations(
 void create_album_observations(obcx::core::IDbConnection &db) {
   db.execute(R"(
     CREATE TABLE bridge_album_observations (
-      pair_id TEXT NOT NULL, source_scope TEXT NOT NULL, target_scope TEXT NOT NULL,
-      message_ref TEXT NOT NULL, delivery_id TEXT NOT NULL, anchor_ref TEXT NOT NULL,
-      data TEXT NOT NULL,
+      pair_id TEXT NOT NULL, source_scope BLOB NOT NULL, target_scope BLOB NOT NULL,
+      message_ref BLOB NOT NULL, delivery_id TEXT NOT NULL, anchor_ref BLOB NOT NULL,
+      data BLOB NOT NULL,
       PRIMARY KEY(pair_id,source_scope,target_scope,message_ref)
-    );
+    ) STRICT;
   )");
   db.execute("CREATE INDEX bridge_album_observations_delivery ON "
              "bridge_album_observations(delivery_id);");
@@ -118,18 +119,17 @@ auto album_observations(obcx::core::IDbConnection &db, const std::string &id)
   for (const auto &row : db.query("SELECT * FROM bridge_album_observations "
                                   "WHERE delivery_id=? ORDER BY message_ref;",
                                   {id})) {
-    const auto serialized = db_string(row, "data");
-    const auto document = Json::parse(serialized);
+    const auto &serialized = db_blob(row, "data");
+    const auto document = decode_record(serialized);
     album_bot::detail::validate_bot_wire(document);
     auto member = document.get<ledger::SuppressedAlbumMember>();
     validate_album_observation(member.observation, admission.source_scope);
-    if (Json(member).dump() != serialized ||
+    if (encode_record(member) != serialized ||
         db_string(row, "pair_id") != admission.pair_id ||
-        db_string(row, "source_scope") != encode(admission.source_scope) ||
-        db_string(row, "target_scope") != encode(admission.target_scope) ||
-        db_string(row, "message_ref") !=
-            encode(member.observation.message_ref) ||
-        db_string(row, "anchor_ref") != encode(member.anchor_member_ref) ||
+        db_blob(row, "source_scope") != encode(admission.source_scope) ||
+        db_blob(row, "target_scope") != encode(admission.target_scope) ||
+        db_blob(row, "message_ref") != encode(member.observation.message_ref) ||
+        db_blob(row, "anchor_ref") != encode(member.anchor_member_ref) ||
         member.anchor_member_ref == member.observation.message_ref ||
         member.first_observed_event_id.empty() ||
         member.observed_position < 0 ||
@@ -146,7 +146,7 @@ auto album_observations(obcx::core::IDbConnection &db, const std::string &id)
          encode(admission.source_scope), encode(admission.target_scope)});
     if (anchors.size() != 1)
       throw std::runtime_error("album association lacks admitted anchor");
-    const auto anchor = Json::parse(db_string(anchors.front(), "data"))
+    const auto anchor = decode_record(db_blob(anchors.front(), "data"))
                             .get<ledger::SourceMember>();
     if (anchor.message_ref != member.anchor_member_ref ||
         anchor.media_group_ref !=
@@ -176,8 +176,11 @@ void validate_album_observations(obcx::core::IDbConnection &db) {
       {"pair_id", "source_scope", "target_scope", "message_ref"});
   for (const auto &column :
        db.query("PRAGMA table_info(bridge_album_observations);"))
-    if (db_string(column, "type") != "TEXT" || db_int64(column, "notnull") != 1)
+    if (db_int64(column, "notnull") != 1)
       throw std::runtime_error("album observation column constraint mismatch");
+  require_blob_columns(
+      db, "bridge_album_observations",
+      {"source_scope", "target_scope", "message_ref", "anchor_ref", "data"});
   const auto index = db.query("SELECT name FROM "
                               "pragma_index_info('bridge_album_observations_"
                               "delivery') ORDER BY seqno;");
@@ -195,7 +198,7 @@ auto suppress_album_batch(
       observations.size() > album_bot::detail::bot_maximum_items)
     throw std::invalid_argument("invalid observed album batch");
   (void)album_decode<album_bot::ConversationRef>(target, "ConversationRef");
-  std::unordered_set<std::string> seen;
+  std::set<DbBlob> seen;
   std::optional<std::pair<std::string, ledger::OpaqueValue>> selected;
   std::vector<std::size_t> unseen;
   for (std::size_t position = 0; position < observations.size(); ++position) {
@@ -220,7 +223,7 @@ auto suppress_album_batch(
     if (!members.empty()) {
       const auto id = db_string(members.front(), "delivery_id");
       const auto admission = admission_from_db(db, id);
-      const auto member = Json::parse(db_string(members.front(), "data"))
+      const auto member = decode_record(db_blob(members.front(), "data"))
                               .get<ledger::SourceMember>();
       if (admission.pair_id != pair || admission.source_scope != source ||
           admission.target_scope != target ||
@@ -260,7 +263,7 @@ auto suppress_album_batch(
         "bridge_album_observations(pair_id,source_scope,target_scope,message_"
         "ref,delivery_id,anchor_ref,data) VALUES(?,?,?,?,?,?,?);",
         {pair, encode(source), encode(target), encode(observation.message_ref),
-         selected->first, encode(selected->second), Json(member).dump()});
+         selected->first, encode(selected->second), encode_record(member)});
   }
   // Bound and validate inside the same transaction, before committing aliases.
   (void)album_observations(db, selected->first);
@@ -274,7 +277,7 @@ auto BridgeStateRepository::observe_album_batch(
     const std::vector<ledger::AlbumObservation> &observations) -> bool {
   return db_manager_.run_transaction<bool>(
       db_instance_, [&](obcx::core::IDbConnection &db) {
-        require_v4(db);
+        require_current_ledger(db);
         return suppress_album_batch(db, pair, source, target, observations);
       });
 }

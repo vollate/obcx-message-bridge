@@ -326,13 +326,8 @@ auto TelegramCommandHandler::handle_userinfo_command(
                   *state, pair_id, original_scope, reply);
               if (!original)
                 return std::nullopt;
-              const auto record = received->get_message("qq", *original);
-              if (!record || !record->message)
-                return std::nullopt;
-              if (const auto *known = std::get_if<obcx::bot::KnownUser>(
-                      &record->message->sender))
-                return known->user;
-              return std::nullopt;
+              const auto record = received->get_message(*original);
+              return record ? record->sender : std::nullopt;
             });
         if (!observed_user) {
           co_return "❌ "
@@ -345,8 +340,8 @@ auto TelegramCommandHandler::handle_userinfo_command(
                                   *observed_user, true)
                             : co_await operations_->get_onebot11_user_info(
                                   target_user_id, true);
-      const auto user_id = std::to_string(
-          obcx::onebot11::bot::user_identity_view(info.user).user_id);
+      const auto user_id =
+          std::to_string(std::get<obcx::bot::OneBotUserId>(info.user.id).id);
       avatar_url = "https://q1.qlogo.cn/g?b=qq&nk=" + user_id + "&s=640";
       const auto sex = info.sex == "male"     ? "男"
                        : info.sex == "female" ? "女"
@@ -507,7 +502,6 @@ auto TelegramCommandHandler::handle_poke_command(
         [state = state_repository_, received = received_message_repository_,
          operations = operations_, pair, operation_id, command, reply,
          onebot_installation, original_scope,
-         qq_conversation = qq_conversation_id(std::string{qq_group_id}),
          group_id = std::string{qq_group_id}] {
           PokeSelection selected;
           if (auto existing =
@@ -543,27 +537,18 @@ auto TelegramCommandHandler::handle_poke_command(
           } else {
             return selected;
           }
-          const auto record = received->get_message("qq", *original);
-          if (!record || !record->message)
+          const auto record = received->get_message(*original);
+          if (!record || !record->sender)
             return selected;
-          if (record->platform != "qq" ||
-              record->source_bot != onebot_installation ||
-              record->conversation_id != qq_conversation ||
-              record->message->message != *original ||
-              record->group_id != group_id)
+          if (original->conversation != original_scope ||
+              original_scope.installation.installation_id !=
+                  onebot_installation)
             throw std::runtime_error("poke Store source identity mismatch");
-          const auto *known =
-              std::get_if<obcx::bot::KnownUser>(&record->message->sender);
-          if (!known)
-            return selected;
           selected.request =
-              operations->prepare_onebot11_poke(group_id, known->user);
+              operations->prepare_onebot11_poke(group_id, *record->sender);
           selected.evidence = {{"reply", reply},
-                               {"source_platform", "qq"},
-                               {"source_bot", onebot_installation},
-                               {"source_conversation", qq_conversation},
-                               {"source_message_id", record->message_id},
-                               {"source_user_id", record->user_id},
+                               {"source_message", *original},
+                               {"source_user", *record->sender},
                                {"v4_binding", selected.binding.has_value()}};
           return selected;
         });

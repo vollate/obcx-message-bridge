@@ -18,7 +18,7 @@ namespace bridge {
 
 class BridgeStateRepository {
 public:
-  static constexpr std::int64_t current_schema_version = 5;
+  static constexpr std::int64_t current_schema_version = 6;
 
   BridgeStateRepository(obcx::core::DbManager &db_manager,
                         std::string db_instance, std::string db_namespace);

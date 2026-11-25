@@ -143,10 +143,10 @@ TextForwarder::TextForwarder(
       max_attempts <= 0)
     throw std::invalid_argument(
         "QQ text forwarding requires owned services and budget");
-  const bot::BotInstallationRef qq{pair.onebot11_installation,
-                                   bot::SurfaceId{"onebot11.qq"}};
-  const bot::BotInstallationRef tg{pair.telegram_installation,
-                                   bot::SurfaceId{"telegram.bot_api"}};
+  const bot::BotInstallationRef qq{bot::Platform::OneBot11,
+                                   pair.onebot11_installation};
+  const bot::BotInstallationRef tg{bot::Platform::Telegram,
+                                   pair.telegram_installation};
   const auto add = [&](const std::string &source, const std::string &target,
                        std::optional<std::string> topic, bool show_sender) {
     auto from = require(
@@ -203,8 +203,7 @@ auto TextForwarder::accepts(const bot::MessageReceived &source) -> bool {
 
 auto TextForwarder::display_name(bot::UserRef user, Route route)
     -> boost::asio::awaitable<std::optional<std::string>> {
-  const auto id =
-      std::to_string(obcx::onebot11::bot::user_identity_view(user).user_id);
+  const auto id = std::to_string(std::get<obcx::bot::OneBotUserId>(user.id).id);
   const auto installation = user.installation.installation_id;
   auto cached = co_await blocking_->run([repository = repository_, installation,
                                          id, group = route.source_group] {
@@ -252,7 +251,7 @@ auto TextForwarder::render_text(bot::ReceivedRichText text, Route route)
     } else if (route.show_sender) {
       if (const auto *mention = std::get_if<bot::Mention>(&span)) {
         const auto id = std::to_string(
-            obcx::onebot11::bot::user_identity_view(mention->user).user_id);
+            std::get<obcx::bot::OneBotUserId>(mention->user.id).id);
         const auto name = co_await display_name(mention->user, route);
         result.emplace_back(
             bot::Text{name ? "@" + *name + " " : "[@" + id + "] ", {}});
@@ -544,8 +543,8 @@ auto TextForwarder::forward(obcx::message_store::events::MessageStored stored,
             std::get_if<bot::KnownUser>(&stored.message.sender)) {
       const auto user = known->user;
       auto name = co_await display_name(user, route);
-      label = name.value_or(std::to_string(
-          obcx::onebot11::bot::user_identity_view(user).user_id));
+      label = name.value_or(
+          std::to_string(std::get<obcx::bot::OneBotUserId>(user.id).id));
     } else {
       // An anonymous/unknown sender's predecessor display key is presentation,
       // not a UserRef. Read its existing cache without any member/self query.

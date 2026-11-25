@@ -23,7 +23,7 @@ auto encode(std::string codec, const T &value) -> ledger::OpaqueValue {
   auto bytes = bot::Json::to_cbor(json);
   if (bytes.size() > bot::detail::bot_maximum_bytes)
     throw bot::detail::BotBudgetExceeded{};
-  const auto version = codec == "bridge.EditIntent.cbor" ? 2 : 1;
+  const auto version = ledger::codec_version(codec);
   return {std::move(codec), version, {bytes.begin(), bytes.end()}};
 }
 auto confirmed_output(const ledger::DeliverySnapshot &snapshot,

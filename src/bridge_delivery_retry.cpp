@@ -18,14 +18,14 @@ auto encode(std::string_view name, const T &value) -> ledger::OpaqueValue {
   const d::Json document = value;
   d::detail::validate_bot_wire(document);
   const auto bytes = d::Json::to_cbor(document);
-  return {"obcx.bot." + std::string(name) + ".cbor",
-          name == "BridgeDeliveryPolicy" ? 2 : 1,
+  const auto codec = "obcx.bot." + std::string(name) + ".cbor";
+  return {codec, ledger::codec_version(codec),
           std::string(bytes.begin(), bytes.end())};
 }
 auto decode(const ledger::OpaqueValue &value, std::string_view name)
     -> d::Json {
   if (value.codec != "obcx.bot." + std::string(name) + ".cbor" ||
-      value.version != (name == "BridgeDeliveryPolicy" ? 2 : 1) ||
+      value.version != ledger::codec_version(value.codec) ||
       value.bytes.empty() || value.bytes.size() > d::detail::bot_maximum_bytes)
     throw std::invalid_argument("unsupported typed bridge retry encoding");
   auto document = d::Json::from_cbor(value.bytes.begin(), value.bytes.end());

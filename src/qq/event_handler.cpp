@@ -84,24 +84,14 @@ auto QQEventHandler::handle_recall_event(obcx::bot::MessageDeleted deleted)
 
     if (!state_repository_ || !blocking_executor_)
       throw std::runtime_error("recall propagation storage unavailable");
-    std::optional<storage::MessageInfo> original;
+    std::optional<ReceivedMessageFacts> original;
     if (received_message_repository_) {
       original = co_await blocking_executor_->run(
           [received = received_message_repository_, message = deleted.message] {
-            return received->get_message("qq", message);
+            return received->get_message(message);
           });
     }
-    bool picture = false;
-    std::optional<obcx::bot::MessageReceived> source;
-    if (original) {
-      if (!original->message || original->message->message != deleted.message)
-        throw std::runtime_error("recall typed source identity mismatch");
-      source = *original->message;
-      picture = std::ranges::any_of(source->body, [](const auto &block) {
-        const auto *media = std::get_if<obcx::bot::ReceivedMedia>(&block);
-        return media && media->kind == obcx::bot::MediaKind::Image;
-      });
-    }
+    const bool picture = original && original->has_image;
     bool show_sender = route->show_qq_to_tg_sender;
     if (route->mode == BridgeMode::TOPIC_TO_GROUP) {
       const auto *topic = config_->topic_config(operations_->pair_id(),
@@ -109,19 +99,19 @@ auto QQEventHandler::handle_recall_event(obcx::bot::MessageDeleted deleted)
       show_sender = topic != nullptr && topic->show_qq_to_tg_sender;
     }
     obcx::telegram::bot::FormattedText text;
-    if (!picture && show_sender && original && source) {
+    if (!picture && show_sender && original) {
       std::string sender = "Unknown";
-      if (const auto *known =
-              std::get_if<obcx::bot::KnownUser>(&source->sender)) {
+      if (const auto &user = original->sender) {
         const auto member =
             co_await obcx::bot::BotClient{*operations_->operation_gateway()}
-                .get_member({source->message.conversation, known->user});
+                .get_member({deleted.message.conversation, *user});
         if (!member.ok() &&
             member.error->code == obcx::bot::BotOperationErrorCode::Cancelled)
           throw BridgeBotOperationFailure(*member.error);
         sender = member.ok() && member.value->display_name
                      ? *member.value->display_name
-                     : known->user.id.serialized();
+                     : std::to_string(
+                           std::get<obcx::bot::OneBotUserId>(user->id).id);
       }
       text.emplace_back(obcx::bot::Text{
           fmt::format("[{}] ", sanitize_generated_text(sender)), {}});

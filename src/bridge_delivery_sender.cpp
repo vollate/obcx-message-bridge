@@ -30,8 +30,8 @@ auto encode(std::string_view type, const T &value) -> ledger::OpaqueValue {
   const bot::Json document = value;
   bot::detail::validate_bot_wire(document);
   const auto bytes = bot::Json::to_cbor(document);
-  return {"obcx.bot." + std::string(type) + ".cbor",
-          type == "BridgeDeliveryPolicy" ? 2 : 1,
+  const auto codec = "obcx.bot." + std::string(type) + ".cbor";
+  return {codec, ledger::codec_version(codec),
           std::string(bytes.begin(), bytes.end())};
 }
 auto decode_message(const ledger::OpaqueValue &value) -> bot::MessageRef {

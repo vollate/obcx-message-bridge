@@ -1,6 +1,6 @@
 # OBCX Message Bridge
 
-`obcx-message-bridge` is the native ABI 2 actor that forwards stored messages
+`obcx-message-bridge` is the native ABI 3 actor that forwards stored messages
 between QQ and Telegram. It consumes
 `obcx::message_store::events::MessageStored` through generated reflected
 dispatch and performs bot I/O with `ActorContext::await_asio`. Successful and
@@ -299,25 +299,17 @@ first-media-send latency. Telegram `poll_force_close_ms` must be at least
 
 ### Current conversation-scoped schema
 
-Bridge-owned state uses schema version 3. Every live message identity is
-`(installation, platform, conversation_id, message_id)`: QQ groups use
-`group:<id>`, Telegram chats use `chat:<id>`, and Telegram topic id remains
-separate route metadata. Mappings, retry rows, and media-group rows include both
-source and target conversations; installation-scoped user/sticker caches and
-heartbeats retain their existing shape. Equal Telegram message ids in two
-chats are valid and MUST NOT be deduplicated or deleted as duplicates.
+Bridge-owned state uses schema version 6. Ledger references carry a platform
+and installation plus typed conversation/message IDs. Native SQLite BLOBs
+preserve source members, output receipts, retry evidence, revisions, and command
+fences without hex-encoded text. Telegram topic 1 and an absent topic remain
+distinct routing facts even when their canonical conversation IDs match.
 
-Startup validates existing schema v3 without upgrading or reclassifying history.
-A completely empty Bridge namespace is initialized directly as v3 in one
-transaction. Older, newer, unversioned and partial state is rejected; restarting
-does not upgrade it. Reload performs only read-only validation and never publishes
-an uninitialized repository. Mapping primary ownership and required indexes are
-still checked.
-
-Existing mappings, retries, caches, deduplication and any historical archive
-tables remain untouched by schema initialization. Bridge does not use Message
-Store history to reconstruct old mappings. Do not clear tables or choose another
-namespace to bypass a schema error.
+Startup creates schema 6 only for an empty Bridge namespace. It rejects schema 5,
+unversioned tables, and incomplete schemas without converting or discarding
+history. Reload only validates the existing schema. Bridge reads archive facts
+from Message Store schema 6 and consumes `MessageStored` wire schema 3;
+`MessageForwarded` and durable persistence failures also use wire schema 3.
 
 Before a separately authorized deployment, take a SQLite-consistent backup of
 the complete shared database and save matching host/actor artifacts and config.

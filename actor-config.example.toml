@@ -63,7 +63,7 @@ db_namespace = "bridge"
 
 [actors.bridge.config]
 # Every deployment requires installation_pairs and an explicit pair on routes.
-# Existing databases must already use schema v3; startup does not upgrade them.
+# Existing Bridge databases must already use schema v6; startup does not upgrade them.
 database_file = "bridge_bot.db"
 enable_retry_queue = true
 message_retry_max_attempts = 5

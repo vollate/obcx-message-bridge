@@ -61,7 +61,7 @@ void TGMediaGroupBuffer::add(
   message.source().validate();
   const auto &installation = message.source().message.conversation.installation;
   if (installation.installation_id != source_installation ||
-      installation.surface != obcx::bot::SurfaceId{"telegram.bot_api"})
+      installation.platform != obcx::bot::Platform::Telegram)
     throw std::invalid_argument("Telegram album source installation mismatch");
   if (!message.source().media_group) {
     if (flush_fn) {

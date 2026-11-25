@@ -1,6 +1,7 @@
 #include "bridge_delivery_revision.hpp"
 #include "bridge_delivery_sender.hpp"
 #include <algorithm>
+#include <core/actor/actor_messages.hpp>
 
 #include <chrono>
 #include <stdexcept>
@@ -10,11 +11,7 @@ namespace {
 namespace d = obcx::bot;
 auto document(const ledger::OpaqueValue &value, std::string_view codec)
     -> d::Json {
-  if (value.codec != codec ||
-      value.version != ((codec == "bridge.EditIntent.cbor" ||
-                         codec == "obcx.bot.BridgeDeliveryPolicy.cbor")
-                            ? 2
-                            : 1) ||
+  if (value.codec != codec || value.version != ledger::codec_version(codec) ||
       value.bytes.empty() || value.bytes.size() > d::detail::bot_maximum_bytes)
     throw std::runtime_error("unsupported bridge publication evidence");
   auto result = d::Json::from_cbor(value.bytes.begin(), value.bytes.end());
@@ -26,9 +23,9 @@ auto document(const ledger::OpaqueValue &value, std::string_view codec)
 }
 auto platform(const d::ConversationRef &scope) -> std::string {
   scope.validate();
-  if (scope.installation.surface == d::SurfaceId{"onebot11.qq"})
+  if (scope.installation.platform == d::Platform::OneBot11)
     return "qq";
-  if (scope.installation.surface == d::SurfaceId{"telegram.bot_api"})
+  if (scope.installation.platform == d::Platform::Telegram)
     return "telegram";
   throw std::invalid_argument("unsupported Bridge publication surface");
 }
@@ -48,14 +45,16 @@ auto failure_context(const BridgeDeliveryPublication &publication,
   notification.type = "bridge::events::MessageForwardFailed";
   notification.source_platform = platform(scope);
   notification.source_bot = scope.installation.installation_id;
-  notification.conversation_id = scope.id.serialized();
+  notification.conversation_id =
+      obcx::message_store::events::SourceMessageIdentity::from_message(source)
+          .conversation_id;
   notification.correlation_id = publication.correlation_id;
   notification.causation_id = publication.event_id;
   notification.timestamp = std::chrono::system_clock::now();
   notification.payload = {{"code", std::move(code)},
                           {"message", std::move(message)},
                           {"retryable", false},
-                          {"schema", 2},
+                          {"schema", 3},
                           {"source_message", source},
                           {"source_conversation", scope},
                           {"target_conversation", target},
@@ -208,14 +207,17 @@ auto bridge_delivery_notification(const BridgeDeliveryResult &result)
   notification.id = "forwarded-" + snapshot.delivery_id;
   notification.type = "bridge::events::MessageForwarded";
   notification.source_platform = platform(source_scope);
-  notification.conversation_id = source_scope.id.serialized();
+  notification.conversation_id =
+      obcx::message_store::events::SourceMessageIdentity::from_message(
+          primary.at("message").get<d::MessageRef>())
+          .conversation_id;
   notification.source_bot = source_bot;
   notification.correlation_id =
       publication.at("correlation_id").get<std::string>();
   notification.causation_id = event_id;
   notification.timestamp = std::chrono::system_clock::now();
   notification.payload = {
-      {"schema", 2},
+      {"schema", 3},
       {"source_message", primary.at("message")},
       {"source_conversation", source_scope},
       {"target_conversation", target_scope},
@@ -347,14 +349,16 @@ auto bridge_revision_notification(const BridgeRevisionResult &result)
                     ":edit:" + revision.admission.revision_id;
   notification.type = "bridge::events::MessageForwarded";
   notification.source_platform = platform(source_scope);
-  notification.conversation_id = source_scope.id.serialized();
+  notification.conversation_id =
+      obcx::message_store::events::SourceMessageIdentity::from_message(source)
+          .conversation_id;
   notification.source_bot = source_bot;
   notification.correlation_id =
       publication.at("correlation_id").get<std::string>();
   notification.causation_id = publication.at("event_id").get<std::string>();
   notification.timestamp = std::chrono::system_clock::now();
   notification.payload = {
-      {"schema", 2},
+      {"schema", 3},
       {"source_message", source},
       {"source_conversation", source_scope},
       {"target_conversation", target_scope},

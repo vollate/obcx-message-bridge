@@ -96,8 +96,7 @@ OrdinaryForwarder::OrdinaryForwarder(
     : gateway_(std::move(gateway)), references_(std::move(references)),
       repository_(std::move(repository)), blocking_(std::move(blocking)),
       config_(std::move(config)),
-      installation_{pair.telegram_installation,
-                    bot::SurfaceId{"telegram.bot_api"}},
+      installation_{bot::Platform::Telegram, pair.telegram_installation},
       pair_id_(pair.id) {
   if (!gateway_ || !references_ || !repository_ || !blocking_ || !config_)
     throw std::invalid_argument(
@@ -105,8 +104,8 @@ OrdinaryForwarder::OrdinaryForwarder(
   media_processor_ = std::make_shared<TelegramMediaProcessor>(
       std::make_shared<BridgeCommandOperations>(gateway_, pair, references_),
       config_, repository_, blocking_);
-  const bot::BotInstallationRef target_installation{
-      pair.onebot11_installation, bot::SurfaceId{"onebot11.qq"}};
+  const bot::BotInstallationRef target_installation{bot::Platform::OneBot11,
+                                                    pair.onebot11_installation};
   const auto add = [&](const std::string &group,
                        std::optional<std::string> topic, bool all_topics,
                        const std::string &qq, bool show_sender) {
@@ -253,7 +252,7 @@ auto OrdinaryForwarder::render_text(bot::ReceivedRichText text,
     } else if (const auto *mention = std::get_if<bot::Mention>(&span)) {
       auto name = co_await display_name(mention->user, source);
       const auto id = std::to_string(
-          obcx::telegram::bot::user_identity_view(mention->user).user_id);
+          std::get<obcx::bot::TelegramUserId>(mention->user.id).id);
       rendered.emplace_back(
           bot::Text{name ? "@" + *name : "[@" + id + "]", {}});
     } else if (const auto *username =

@@ -49,8 +49,8 @@ auto display_text(const d::ReceivedRichText &source) -> d::RichText {
       if (!text->content.empty())
         result.emplace_back(*text);
     } else if (const auto *mention = std::get_if<d::Mention>(&span)) {
-      const auto view = qq::user_identity_view(mention->user);
-      append(result, "[@" + std::to_string(view.user_id) + "]");
+      const auto &id = std::get<obcx::bot::OneBotUserId>(mention->user.id);
+      append(result, "[@" + std::to_string(id.id) + "]");
     } else if (std::holds_alternative<d::MentionEveryone>(span)) {
       append(result, "[@all]");
     } else {

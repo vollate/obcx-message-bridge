@@ -43,7 +43,7 @@ template <class T> auto require(d::BotOperationResult<T> result) -> T {
 auto decode(const ledger::OpaqueValue &value, std::string_view name)
     -> d::Json {
   if (value.codec != "obcx.bot." + std::string(name) + ".cbor" ||
-      value.version != (name == "BridgeDeliveryPolicy" ? 2 : 1) ||
+      value.version != ledger::codec_version(value.codec) ||
       value.bytes.empty() || value.bytes.size() > d::detail::bot_maximum_bytes)
     throw std::runtime_error("unsupported retry route evidence");
   auto document = d::Json::from_cbor(value.bytes.begin(), value.bytes.end());
@@ -141,10 +141,10 @@ BridgeDeliveryRetryWorker::BridgeDeliveryRetryWorker(
         {pair, source, std::move(address), all_topics, std::move(resolved)});
   };
   for (const auto &[id, pair] : config.installation_pairs) {
-    const d::BotInstallationRef qq{pair.onebot11_installation,
-                                   d::SurfaceId{"onebot11.qq"}};
-    const d::BotInstallationRef tg{pair.telegram_installation,
-                                   d::SurfaceId{"telegram.bot_api"}};
+    const d::BotInstallationRef qq{d::Platform::OneBot11,
+                                   pair.onebot11_installation};
+    const d::BotInstallationRef tg{d::Platform::Telegram,
+                                   pair.telegram_installation};
     for (const auto &[key, mapping] : pair.group_map) {
       (void)key;
       const auto telegram_group =

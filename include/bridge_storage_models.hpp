@@ -1,7 +1,5 @@
 #pragma once
 
-#include <core/bot/bot_events.hpp>
-
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -20,23 +18,6 @@ struct UserInfo {
   std::string first_name;
   std::string last_name;
   std::chrono::system_clock::time_point last_updated;
-};
-
-struct MessageInfo {
-  std::string platform;
-  std::string source_bot;
-  std::string conversation_id;
-  std::string message_id;
-  std::string group_id;
-  std::string user_id;
-  std::string content;
-  std::string message_type;
-  std::chrono::system_clock::time_point timestamp;
-  std::optional<std::string> reply_to_message_id;
-  std::optional<std::string> forwarded_to_platform;
-  std::optional<std::string> forwarded_message_id;
-  std::chrono::system_clock::time_point created_at;
-  std::optional<obcx::bot::MessageReceived> message;
 };
 
 struct StickerCacheInfo {

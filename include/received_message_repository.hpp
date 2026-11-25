@@ -1,7 +1,6 @@
 #pragma once
 
-#include "bridge_storage_models.hpp"
-
+#include <core/bot/bot_events.hpp>
 #include <core/infrastructure/db_manager.hpp>
 
 #include <optional>
@@ -9,25 +8,21 @@
 
 namespace bridge {
 
+// Projection for recall and reply commands, not a restored media capability.
+struct ReceivedMessageFacts {
+  std::optional<obcx::bot::UserRef> sender;
+  bool has_image;
+};
+
 class ReceivedMessageRepository {
 public:
   ReceivedMessageRepository(obcx::core::DbManager &db_manager,
                             std::string db_instance, std::string db_namespace);
 
-  auto get_message(const std::string &source_platform,
-                   const std::string &source_bot,
-                   const std::string &conversation_id,
-                   const std::string &message_id) const
-      -> std::optional<storage::MessageInfo>;
-
-  auto get_message(const std::string &source_platform,
-                   const obcx::bot::MessageRef &message) const
-      -> std::optional<storage::MessageInfo>;
+  auto get_message(const obcx::bot::MessageRef &message) const
+      -> std::optional<ReceivedMessageFacts>;
 
 private:
-  auto read(const std::string &platform, const std::string &filter,
-            const obcx::core::DbParams &parameters) const
-      -> std::optional<storage::MessageInfo>;
   obcx::core::DbManager &db_manager_;
   std::string db_instance_;
   std::string db_namespace_;

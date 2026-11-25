@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace bridge::ledger {
@@ -10,7 +11,14 @@ namespace bridge::ledger {
 // The forwarding owner binds these bytes with the frozen SDK codec. Storage
 // never parses platform identifiers or supplies installation/topic defaults.
 // bytes is binary-safe, including NUL/non-UTF-8. The repository persists it in
-// its own versioned canonical lowercase-hex JSON envelope, not as UTF-8 text.
+// a versioned binary envelope, not as UTF-8 text.
+constexpr auto codec_version(std::string_view codec) -> std::int64_t {
+  return codec == "obcx.bot.BridgeDeliveryPolicy.cbor" ||
+                 codec == "bridge.EditIntent.cbor"
+             ? 3
+             : 1;
+}
+
 struct OpaqueValue {
   std::string codec;
   std::int64_t version;

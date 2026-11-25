@@ -4,10 +4,12 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <limits>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -55,8 +57,8 @@ constexpr std::string_view kStickerCacheTable = "bridge_sticker_cache";
 constexpr std::string_view kQqStickerTable = "bridge_qq_sticker_mappings";
 constexpr std::string_view kHeartbeatsTable = "bridge_platform_heartbeats";
 
-void create_v4_ledger(obcx::core::IDbConnection &connection);
-void validate_v4_ledger(obcx::core::IDbConnection &connection);
+void create_delivery_ledger(obcx::core::IDbConnection &connection);
+void validate_ledger(obcx::core::IDbConnection &connection);
 
 auto timestamp_ms(const std::chrono::system_clock::time_point &time)
     -> std::int64_t {
@@ -317,10 +319,11 @@ void BridgeStateRepository::initialize_schema() {
                                ";");
           if (rows.size() != 1 ||
               db_int64(rows.front(), "version") != current_schema_version) {
-            throw std::runtime_error("bridge requires current typed schema 5");
+            throw std::runtime_error("bridge requires schema 6; older ledgers "
+                                     "must be converted offline");
           }
           validate_auxiliary_columns(connection);
-          validate_v4_ledger(connection);
+          validate_ledger(connection);
           return;
         }
         if (!connection
@@ -331,14 +334,14 @@ void BridgeStateRepository::initialize_schema() {
               "bridge refuses unversioned or partial state");
         }
         create_auxiliary_tables(connection);
-        create_v4_ledger(connection);
+        create_delivery_ledger(connection);
         connection.execute(
             "CREATE TABLE bridge_schema_version (version INTEGER NOT NULL);");
         connection.execute(
             "INSERT INTO bridge_schema_version(version) VALUES (?);",
             {current_schema_version});
         validate_auxiliary_columns(connection);
-        validate_v4_ledger(connection);
+        validate_ledger(connection);
       });
 }
 
@@ -346,16 +349,17 @@ void BridgeStateRepository::validate_schema() const {
   db_manager_.run_read<void>(
       db_instance_, [](obcx::core::IDbConnection &connection) {
         if (!table_exists(connection, kSchemaTable)) {
-          throw std::runtime_error("bridge requires initialized schema 5");
+          throw std::runtime_error("bridge requires initialized schema 6");
         }
         const auto rows =
             connection.query("SELECT version FROM bridge_schema_version;");
         if (rows.size() != 1 ||
             db_int64(rows.front(), "version") != current_schema_version) {
-          throw std::runtime_error("bridge requires current typed schema 5");
+          throw std::runtime_error("bridge requires schema 6; older ledgers "
+                                   "must be converted offline");
         }
         validate_auxiliary_columns(connection);
-        validate_v4_ledger(connection);
+        validate_ledger(connection);
       });
 }
 

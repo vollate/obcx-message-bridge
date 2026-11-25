@@ -100,10 +100,10 @@ BridgeCommandOperations::BridgeCommandOperations(
     std::shared_ptr<const obcx::bot::ConversationResolver> references)
     : client_(std::move(client)), references_(std::move(references)),
       pair_id_(pair.id),
-      telegram_{.installation_id = pair.telegram_installation,
-                .surface = obcx::bot::SurfaceId{"telegram.bot_api"}},
-      onebot11_{.installation_id = pair.onebot11_installation,
-                .surface = obcx::bot::SurfaceId{"onebot11.qq"}} {
+      telegram_{.platform = obcx::bot::Platform::Telegram,
+                .installation_id = pair.telegram_installation},
+      onebot11_{.platform = obcx::bot::Platform::OneBot11,
+                .installation_id = pair.onebot11_installation} {
   if (!client_ || !references_) {
     throw std::invalid_argument(
         "bridge requires gateway and reference resolver");

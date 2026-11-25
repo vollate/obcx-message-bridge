@@ -1,9 +1,24 @@
 # Bot SDK migration — Bridge owner
 
-## Current SDK 2.7.0 / Bridge schema 5
+## Current SDK ABI 3 / Bridge schema 6
 
-This section supersedes all older build, schema-4, conversion and migration
-instructions below; those sections are historical evidence only.
+Bridge uses typed OneBot11 and Telegram IDs, consumes Message Store schema 6
+and `MessageStored` wire schema 3, and emits schema-3 delivery publications.
+Provider targets still come from explicitly configured routes. Actual topic 1
+and absent topic remain distinct facts even when the canonical scope is equal.
+
+Each binary ledger value starts with `[format=2][codec ID][big-endian uint16
+version]` followed by CBOR. The codec ID table in `src/bridge_delivery_ledger.inc`
+is append-only. ID 0/version 1 wraps ledger records; their nested opaque values
+are CBOR byte strings containing their own envelopes. Policy and EditIntent
+require version 3. Album identity and retry scheduling use indexed or scalar
+columns rather than JSON extraction; retry authorization still checks the
+persisted evidence. Schema 5 (including `bytes_hex` wrappers) is rejected at
+startup and must be converted offline on a copy before deployment.
+
+## Historical SDK ABI 2 / Bridge schema 5
+
+This and the remaining sections are historical evidence only.
 
 Bridge now uses current ConversationResolver configuration, scoped references,
 typed Store schema-5 messages and explicit current QQ/TG views. Generic reference

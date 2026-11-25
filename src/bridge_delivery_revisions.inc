@@ -69,36 +69,43 @@ void create_revision_ledger(obcx::core::IDbConnection &db) {
     CREATE TABLE bridge_delivery_revisions (
       delivery_id TEXT NOT NULL, revision_id TEXT NOT NULL,
       member_id TEXT NOT NULL, native_edited_at_ms INTEGER NOT NULL,
-      admission TEXT NOT NULL, checkpoint TEXT,
+      admission BLOB NOT NULL, checkpoint BLOB, retry_due_at_ms INTEGER,
+      CHECK(checkpoint IS NOT NULL OR retry_due_at_ms IS NULL),
       PRIMARY KEY(delivery_id,revision_id),
       UNIQUE(delivery_id,member_id,native_edited_at_ms)
-    );
+    ) STRICT;
   )");
   db.execute(R"(
     CREATE TABLE bridge_revision_outputs (
       delivery_id TEXT NOT NULL, revision_id TEXT NOT NULL,
-      message_ref TEXT NOT NULL, data TEXT NOT NULL,
-      confirmation_attempts TEXT NOT NULL,
+      message_ref BLOB NOT NULL, data BLOB NOT NULL,
+      confirmation_attempts BLOB NOT NULL,
       PRIMARY KEY(delivery_id,message_ref)
-    );
+    ) STRICT;
   )");
   db.execute(R"(
     CREATE TABLE bridge_revision_output_claims (
-      delivery_id TEXT NOT NULL, message_ref TEXT NOT NULL,
+      delivery_id TEXT NOT NULL, message_ref BLOB NOT NULL,
       revision_id TEXT NOT NULL,
       PRIMARY KEY(delivery_id,message_ref)
-    );
+    ) STRICT;
   )");
 }
 void validate_revision_ledger(obcx::core::IDbConnection &db) {
   require_columns(db, "bridge_delivery_revisions",
                   {"delivery_id", "revision_id", "member_id",
-                   "native_edited_at_ms", "admission", "checkpoint"});
+                   "native_edited_at_ms", "admission", "checkpoint",
+                   "retry_due_at_ms"});
   require_columns(db, "bridge_revision_outputs",
                   {"delivery_id", "revision_id", "message_ref", "data",
                    "confirmation_attempts"});
   require_columns(db, "bridge_revision_output_claims",
                   {"delivery_id", "message_ref", "revision_id"});
+  require_blob_columns(db, "bridge_delivery_revisions",
+                       {"admission", "checkpoint"});
+  require_blob_columns(db, "bridge_revision_outputs",
+                       {"message_ref", "data", "confirmation_attempts"});
+  require_blob_columns(db, "bridge_revision_output_claims", {"message_ref"});
   require_unique_key(db, "bridge_delivery_revisions",
                      {"delivery_id", "revision_id"});
   require_unique_key(db, "bridge_delivery_revisions",
@@ -135,7 +142,7 @@ void validate_revision_admission(const ledger::RevisionAdmission &value) {
        (value.previous_revision_id->empty() ||
         *value.previous_revision_id == value.revision_id)))
     throw std::invalid_argument("invalid revision identity or source evidence");
-  std::set<std::string> refs;
+  std::set<DbBlob> refs;
   for (const auto &ref : value.expected_outputs) {
     require_blob(ref);
     if (!refs.insert(encode(ref)).second)
@@ -203,13 +210,13 @@ void validate_revision_checkpoint(const ledger::RevisionAdmission &admission,
        !value.send_results.back().retryable ||
        !value.send_results.back().outputs.empty()))
     throw std::invalid_argument("unsafe edit retry scheduling");
-  std::set<std::string> deleted;
+  std::set<DbBlob> deleted;
   for (const auto &ref : value.deleted_outputs)
     if (std::ranges::find(admission.expected_outputs, ref) ==
             admission.expected_outputs.end() ||
         !deleted.insert(encode(ref)).second)
       throw std::invalid_argument("revision deletion was not planned");
-  std::set<std::string> retained;
+  std::set<DbBlob> retained;
   for (const auto &ref : value.retained_outputs)
     if (std::ranges::find(admission.expected_outputs, ref) ==
             admission.expected_outputs.end() ||
@@ -221,7 +228,7 @@ void validate_revision_checkpoint(const ledger::RevisionAdmission &admission,
       deleted.size() + retained.size() != admission.expected_outputs.size())
     throw std::invalid_argument(
         "replacement requires settled predecessor deletion outcomes");
-  std::set<std::string> outputs;
+  std::set<DbBlob> outputs;
   for (const auto &output : value.outputs) {
     require_blob(output.message_ref);
     if (!outputs.insert(encode(output.message_ref)).second ||
@@ -302,10 +309,10 @@ void merge_revision_output(
                "data,confirmation_attempts) "
                "VALUES(?,?,?,?,?);",
                {admission.delivery_id, admission.revision_id, ref,
-                Json(output).dump(), attempts.dump()});
+                encode_record(output), encode_record(attempts)});
     return;
   }
-  auto merged = Json::parse(db_string(rows.front(), "data"))
+  auto merged = decode_record(db_blob(rows.front(), "data"))
                     .get<ledger::PhysicalOutput>();
   if (db_string(rows.front(), "revision_id") != admission.revision_id ||
       merged.message_ref != output.message_ref ||
@@ -328,7 +335,7 @@ void merge_revision_output(
   };
   append(merged.reusable_media, output.reusable_media);
   append(merged.detail_evidence, output.detail_evidence);
-  auto attempts = Json::parse(db_string(rows.front(), "confirmation_attempts"))
+  auto attempts = decode_record(db_blob(rows.front(), "confirmation_attempts"))
                       .get<std::vector<std::string>>();
   if (confirmation_attempt &&
       std::ranges::find(attempts, *confirmation_attempt) == attempts.end())
@@ -337,7 +344,7 @@ void merge_revision_output(
       "UPDATE bridge_revision_outputs SET data=?,confirmation_attempts=? WHERE "
       "delivery_id=? AND revision_id=? "
       "AND message_ref=?;",
-      {Json(merged).dump(), Json(attempts).dump(), admission.delivery_id,
+      {encode_record(merged), encode_record(attempts), admission.delivery_id,
        admission.revision_id, ref});
 }
 auto revision_snapshots(obcx::core::IDbConnection &db, const std::string &id)
@@ -356,14 +363,14 @@ auto revision_snapshots(obcx::core::IDbConnection &db, const std::string &id)
        db.query("SELECT * FROM bridge_delivery_revisions WHERE "
                 "delivery_id=? ORDER BY native_edited_at_ms,revision_id;",
                 {id})) {
-    const auto serialized = db_string(row, "admission");
-    auto admission = Json::parse(serialized).get<ledger::RevisionAdmission>();
+    const auto &serialized = db_blob(row, "admission");
+    auto admission = decode_record(serialized).get<ledger::RevisionAdmission>();
     validate_revision_admission(admission);
     if (admission.delivery_id != id ||
         admission.revision_id != db_string(row, "revision_id") ||
         admission.member_id != db_string(row, "member_id") ||
         admission.native_edited_at_ms != db_int64(row, "native_edited_at_ms") ||
-        Json(admission).dump() != serialized)
+        encode_record(admission) != serialized)
       throw std::runtime_error("revision row identity mismatch");
     if (admission.pair_id != parent.pair_id ||
         admission.source_scope != parent.source_scope ||
@@ -373,8 +380,8 @@ auto revision_snapshots(obcx::core::IDbConnection &db, const std::string &id)
         db.query("SELECT message_ref FROM bridge_delivery_members WHERE "
                  "delivery_id=? AND member_id=?;",
                  {id, admission.member_id});
-    if (member.size() != 1 || db_string(member.front(), "message_ref") !=
-                                  encode(admission.source_ref))
+    if (member.size() != 1 ||
+        db_blob(member.front(), "message_ref") != encode(admission.source_ref))
       throw std::runtime_error("revision snapshot source binding mismatch");
     const auto previous = previous_per_member.find(admission.member_id);
     const auto expected_previous = previous == previous_per_member.end()
@@ -384,12 +391,16 @@ auto revision_snapshots(obcx::core::IDbConnection &db, const std::string &id)
       throw std::runtime_error("revision snapshot predecessor chain mismatch");
     previous_per_member[admission.member_id] = admission.revision_id;
     std::optional<ledger::RevisionCheckpoint> checkpoint;
-    if (const auto value = db_optional_string(row, "checkpoint")) {
-      checkpoint = Json::parse(*value).get<ledger::RevisionCheckpoint>();
+    if (const auto value = db_optional_blob(row, "checkpoint")) {
+      checkpoint = decode_record(*value).get<ledger::RevisionCheckpoint>();
       validate_revision_checkpoint(admission, *checkpoint);
-      if (Json(*checkpoint).dump() != *value)
+      if (encode_record(*checkpoint) != *value)
         throw std::runtime_error("noncanonical revision checkpoint");
     }
+    if ((checkpoint ? checkpoint->retry_due_at_ms : std::nullopt) !=
+        db_optional_int64(row, "retry_due_at_ms"))
+      throw std::runtime_error(
+          "revision retry schedule disagrees with checkpoint");
     const auto rows = db.query(
         "SELECT data,confirmation_attempts FROM bridge_revision_outputs WHERE "
         "delivery_id=? AND revision_id=?;",
@@ -397,10 +408,10 @@ auto revision_snapshots(obcx::core::IDbConnection &db, const std::string &id)
     std::vector<ledger::PhysicalOutput> observed;
     std::set<std::string> confirmed_attempts;
     for (const auto &output_row : rows) {
-      observed.push_back(Json::parse(db_string(output_row, "data"))
+      observed.push_back(decode_record(db_blob(output_row, "data"))
                              .get<ledger::PhysicalOutput>());
       for (const auto &attempt :
-           Json::parse(db_string(output_row, "confirmation_attempts"))
+           decode_record(db_blob(output_row, "confirmation_attempts"))
                .get<std::vector<std::string>>()) {
         if (!checkpoint ||
             std::ranges::find(checkpoint->send_attempt_ids, attempt) ==
@@ -459,9 +470,11 @@ void suppress_unresolved_revision_retries(obcx::core::IDbConnection &db,
     if (next.sequence < std::numeric_limits<std::int64_t>::max())
       ++next.sequence;
     next.retry_due_at_ms.reset();
-    db.execute("UPDATE bridge_delivery_revisions SET checkpoint=? WHERE "
+    db.execute("UPDATE bridge_delivery_revisions SET "
+               "checkpoint=?,retry_due_at_ms=? WHERE "
                "delivery_id=? AND revision_id=?;",
-               {Json(next).dump(), id, revision.admission.revision_id});
+               {encode_record(next), optional_int64(next.retry_due_at_ms), id,
+                revision.admission.revision_id});
   }
 }
 auto active_revision_refs(const ledger::RevisionSnapshot &revision)
@@ -488,7 +501,7 @@ auto BridgeStateRepository::admit_revision(
   return db_manager_.run_transaction<
       ledger::AdmissionResult>(db_instance_, [&](obcx::core::IDbConnection
                                                      &db) {
-    require_v4(db);
+    require_current_ledger(db);
     const auto original = admission_from_db(db, pending.delivery_id);
     if (original.pair_id != pending.pair_id ||
         original.source_scope != pending.source_scope ||
@@ -500,7 +513,7 @@ auto BridgeStateRepository::admit_revision(
                  {pending.delivery_id, pending.member_id});
     if (member_rows.size() != 1)
       throw std::runtime_error("revision source member missing");
-    const auto member = Json::parse(db_string(member_rows.front(), "data"))
+    const auto member = decode_record(db_blob(member_rows.front(), "data"))
                             .get<ledger::SourceMember>();
     if (member.message_ref != pending.source_ref)
       throw std::runtime_error("revision source identity changed");
@@ -536,22 +549,22 @@ auto BridgeStateRepository::admit_revision(
       if (attempts.empty())
         throw std::runtime_error("edit has no original delivery outcome");
       for (const auto &attempt : attempts) {
-        const auto terminal = db_optional_string(attempt, "result");
+        const auto terminal = db_optional_blob(attempt, "result");
         if (!terminal ||
-            Json::parse(*terminal).get<ledger::AttemptResult>().effect ==
+            decode_record(*terminal).get<ledger::AttemptResult>().effect ==
                 ledger::Effect::PossiblySubmitted)
           throw std::runtime_error("edit original delivery is uncertain");
       }
-      if (!Json::parse(*db_optional_string(attempts.back(), "result"))
+      if (!decode_record(*db_optional_blob(attempts.back(), "result"))
                .get<ledger::AttemptResult>()
                .complete)
         throw std::runtime_error("edit requires a complete original delivery");
-      std::set<std::string> actual;
+      std::set<DbBlob> actual;
       for (const auto &row : db.query(
                "SELECT data FROM bridge_delivery_outputs WHERE delivery_id=?;",
                {pending.delivery_id})) {
         const auto output =
-            Json::parse(db_string(row, "data")).get<ledger::PhysicalOutput>();
+            decode_record(db_blob(row, "data")).get<ledger::PhysicalOutput>();
         if (!output.provenance)
           throw std::runtime_error("edit original output provenance unknown");
         const bool selected =
@@ -568,7 +581,7 @@ auto BridgeStateRepository::admit_revision(
               "shared edit output requires reconstruction");
         actual.insert(encode(output.message_ref));
       }
-      std::set<std::string> expected;
+      std::set<DbBlob> expected;
       for (const auto &ref : pending.expected_outputs)
         expected.insert(encode(ref));
       if (actual.empty() || actual != expected)
@@ -580,7 +593,7 @@ auto BridgeStateRepository::admit_revision(
              "ORDER BY operation_id;",
              {pending.delivery_id})) {
       const auto operation =
-          Json::parse(db_string(row, "data")).get<ledger::OutputOperation>();
+          decode_record(db_blob(row, "data")).get<ledger::OutputOperation>();
       if (std::ranges::find(pending.expected_outputs, operation.message_ref) !=
           pending.expected_outputs.end())
         operations.push_back(operation);
@@ -593,7 +606,7 @@ auto BridgeStateRepository::admit_revision(
         "bridge_delivery_revisions(delivery_id,revision_id,member_id,"
         "native_edited_at_ms,admission,checkpoint) VALUES(?,?,?,?,?,NULL);",
         {pending.delivery_id, pending.revision_id, pending.member_id,
-         pending.native_edited_at_ms, Json(pending).dump()});
+         pending.native_edited_at_ms, encode_record(pending)});
     for (const auto &ref : pending.expected_outputs) {
       const auto claim = db.query(
           "SELECT revision_id FROM bridge_revision_output_claims WHERE "
@@ -628,20 +641,19 @@ auto BridgeStateRepository::list_ready_revision_retries(
   return db_manager_.run_transaction<std::vector<std::pair<
       std::string, std::string>>>(db_instance_, [&](obcx::core::IDbConnection
                                                         &db) {
-    require_v4(db);
+    require_current_ledger(db);
     std::vector<std::pair<std::string, std::string>> result;
     for (const auto &row : db.query(
              "SELECT r.delivery_id,r.revision_id FROM "
              "bridge_delivery_revisions r "
-             "WHERE json_type(r.checkpoint,'$.retry_due_at_ms')='integer' "
-             "AND json_extract(r.checkpoint,'$.retry_due_at_ms')<=? "
+             "WHERE r.retry_due_at_ms<=? "
              "AND NOT EXISTS (SELECT 1 FROM bridge_revision_outputs o WHERE "
              "o.delivery_id=r.delivery_id AND o.revision_id=r.revision_id) "
              "AND NOT EXISTS (SELECT 1 FROM bridge_delivery_revisions n WHERE "
              "n.delivery_id=r.delivery_id AND n.member_id=r.member_id AND "
              "n.native_edited_at_ms>r.native_edited_at_ms) "
              "ORDER BY "
-             "json_extract(r.checkpoint,'$.retry_due_at_ms'),r.delivery_id,r."
+             "r.retry_due_at_ms,r.delivery_id,r."
              "revision_id LIMIT ?;",
              {ready_at_ms, limit}))
       result.emplace_back(db_string(row, "delivery_id"),
@@ -682,7 +694,7 @@ auto BridgeStateRepository::admit_revision_retry(
       db_instance_,
       [&](obcx::core::IDbConnection &db)
           -> std::optional<ledger::RevisionSnapshot> {
-        require_v4(db);
+        require_current_ledger(db);
         const auto all = revision_snapshots(db, expected.admission.delivery_id);
         const auto current = std::ranges::find_if(all, [&](const auto &entry) {
           return entry.admission.revision_id == expected.admission.revision_id;
@@ -695,9 +707,11 @@ auto BridgeStateRepository::admit_revision_retry(
                          expected.admission.native_edited_at_ms;
             }))
           return std::nullopt;
-        db.execute("UPDATE bridge_delivery_revisions SET checkpoint=? WHERE "
+        db.execute("UPDATE bridge_delivery_revisions SET "
+                   "checkpoint=?,retry_due_at_ms=? WHERE "
                    "delivery_id=? AND revision_id=?;",
-                   {Json(next).dump(), expected.admission.delivery_id,
+                   {encode_record(next), optional_int64(next.retry_due_at_ms),
+                    expected.admission.delivery_id,
                     expected.admission.revision_id});
         const auto saved =
             revision_snapshots(db, expected.admission.delivery_id);
@@ -767,7 +781,7 @@ auto BridgeStateRepository::checkpoint_revision(
   return db_manager_.run_transaction<
       ledger::RevisionSnapshot>(db_instance_, [&](obcx::core::IDbConnection
                                                       &db) {
-    require_v4(db);
+    require_current_ledger(db);
     const auto all = revision_snapshots(db, expected.admission.delivery_id);
     const auto current = std::ranges::find_if(all, [&](const auto &entry) {
       return entry.admission.revision_id == expected.admission.revision_id;
@@ -803,10 +817,12 @@ auto BridgeStateRepository::checkpoint_revision(
           }))
         completed.retry_due_at_ms.reset();
     }
-    const auto value = Json(completed).dump();
-    db.execute("UPDATE bridge_delivery_revisions SET checkpoint=? WHERE "
+    const auto value = encode_record(completed);
+    db.execute("UPDATE bridge_delivery_revisions SET "
+               "checkpoint=?,retry_due_at_ms=? WHERE "
                "delivery_id=? AND revision_id=?;",
-               {value, expected.admission.delivery_id,
+               {value, optional_int64(completed.retry_due_at_ms),
+                expected.admission.delivery_id,
                 expected.admission.revision_id});
     const auto persisted =
         revision_snapshots(db, expected.admission.delivery_id);
@@ -828,7 +844,7 @@ void BridgeStateRepository::record_revision_confirmation(
         "edit confirmation cannot invent order or ownership");
   db_manager_.run_transaction<void>(db_instance_, [&](obcx::core::IDbConnection
                                                           &db) {
-    require_v4(db);
+    require_current_ledger(db);
     const auto revisions = revision_snapshots(db, id);
     const auto found = std::ranges::find_if(revisions, [&](const auto &entry) {
       return entry.admission.revision_id == revision_id;

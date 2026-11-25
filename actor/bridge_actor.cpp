@@ -386,12 +386,13 @@ auto BridgeActor::handle(
     stored.message.validate();
     stored.source.validate(stored.message);
     const auto &platform = stored.source.source_platform;
-    const auto &surface =
-        stored.message.message.conversation.installation.surface;
+    const auto installation_platform =
+        stored.message.message.conversation.installation.platform;
     if ((platform != "qq" && platform != "telegram") ||
-        (platform == "qq" && surface != obcx::bot::SurfaceId{"onebot11.qq"}) ||
+        (platform == "qq" &&
+         installation_platform != obcx::bot::Platform::OneBot11) ||
         (platform == "telegram" &&
-         surface != obcx::bot::SurfaceId{"telegram.bot_api"})) {
+         installation_platform != obcx::bot::Platform::Telegram)) {
       throw std::invalid_argument("MessageStored source platform mismatch");
     }
     if (stored.source.source_platform != message.source_platform ||
@@ -635,13 +636,12 @@ auto BridgeActor::handle(const obcx::core::events::BotSendConfirmedEvent &event,
     confirmation.validate();
     const auto &installation =
         confirmation.output.message.conversation.installation;
-    const auto expected_surface =
-        message.source_platform == "qq"
-            ? obcx::bot::SurfaceId{"onebot11.qq"}
-            : obcx::bot::SurfaceId{"telegram.bot_api"};
+    const auto expected_platform = message.source_platform == "qq"
+                                       ? obcx::bot::Platform::OneBot11
+                                       : obcx::bot::Platform::Telegram;
     if ((message.source_platform != "qq" &&
          message.source_platform != "telegram") ||
-        installation.surface != expected_surface ||
+        installation.platform != expected_platform ||
         message.source_bot != installation.installation_id ||
         message.correlation_id != confirmation.attempt_id)
       throw std::invalid_argument("bridge confirmation envelope mismatch");
@@ -693,7 +693,7 @@ auto BridgeActor::handle(const obcx::core::events::RawNoticeEvent &notice,
       deleted->validate();
       if (notice.payload != message.payload ||
           message.source_platform != "qq" ||
-          source.installation.surface != obcx::bot::SurfaceId{"onebot11.qq"} ||
+          source.installation.platform != obcx::bot::Platform::OneBot11 ||
           source.installation.installation_id != message.source_bot)
         co_return obcx::core::ActorResult::failed(
             "bridge_notice_source_mismatch",

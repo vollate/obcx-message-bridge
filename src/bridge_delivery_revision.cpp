@@ -11,8 +11,7 @@ namespace {
 namespace d = obcx::bot;
 auto decode(const ledger::OpaqueValue &value, std::string_view codec)
     -> d::Json {
-  if (value.codec != codec ||
-      value.version != (codec == "bridge.EditIntent.cbor" ? 2 : 1) ||
+  if (value.codec != codec || value.version != ledger::codec_version(codec) ||
       value.bytes.empty() || value.bytes.size() > d::detail::bot_maximum_bytes)
     throw std::runtime_error("invalid edit evidence codec");
   auto json = d::Json::from_cbor(value.bytes.begin(), value.bytes.end());

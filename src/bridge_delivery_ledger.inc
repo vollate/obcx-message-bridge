@@ -1,57 +1,69 @@
 // Included by bridge_state_repository.cpp so the storage seam needs no build
 // manifest change. All writes use the process DbManager transaction executor.
 namespace bridge::ledger {
-// The storage envelope is independent of the SDK codec/version. Opaque bytes
-// may contain NUL or invalid UTF-8, so JSON strings must contain canonical hex.
+namespace {
+using obcx::core::DbBlob;
+// Stable on-disk codec IDs; append only. ID 0 is the ledger record codec.
+constexpr std::string_view codecs[] = {
+    "",
+    "obcx.bot.ConversationRef.cbor",
+    "obcx.bot.MessageRef.cbor",
+    "obcx.bot.MediaGroupRef.cbor",
+    "obcx.bot.BridgeDeliveryPolicy.cbor",
+    "obcx.bot.SendOutcome.cbor",
+    "obcx.bot.SendOutputDetails.cbor",
+    "obcx.bot.PublishedMedia.cbor",
+    "obcx.bot.BridgeRetrySend.cbor",
+    "obcx.bot.BridgeRetryMediaOwnership.cbor",
+    "obcx.bot.SendLimits.cbor",
+    "obcx.bot.BridgeRecallSourceState.cbor",
+    "obcx.bot.BridgeRecallOutputState.cbor",
+    "obcx.bot.BridgeRecallNoticeOutputState.cbor",
+    "obcx.bot.BridgeReactionSourceState.cbor",
+    "obcx.bot.BridgeReactionOutputState.cbor",
+    "obcx.bot.BridgeReactionPlan.cbor",
+    "obcx.bot.BridgeReactionEvidence.cbor",
+    "obcx.bot.BridgeReactionOutcome.cbor",
+    "obcx.bot.PokeOneBotGroupRequest.cbor",
+    "obcx.bot.BridgePokeEvidence.cbor",
+    "obcx.bot.BridgePokeOutcome.cbor",
+    "bridge.EditIntent.cbor",
+    "bridge.EditOutcomes.cbor"};
+static_assert(std::size(codecs) <= 256);
+constexpr std::uint8_t binary_format = 2;
+
+auto encode_value(const OpaqueValue &value) -> DbBlob {
+  const auto it = std::ranges::find(codecs, value.codec);
+  if (it == std::end(codecs) || it == std::begin(codecs) ||
+      value.version != codec_version(*it) || value.bytes.empty())
+    throw std::invalid_argument("unsupported bridge ledger codec or version");
+  // The 16-bit version is stored big-endian.
+  DbBlob result{binary_format, static_cast<std::uint8_t>(it - codecs),
+                static_cast<std::uint8_t>(value.version >> 8),
+                static_cast<std::uint8_t>(value.version)};
+  result.insert(result.end(), value.bytes.begin(), value.bytes.end());
+  return result;
+}
+auto decode_value(const DbBlob &bytes) -> OpaqueValue {
+  if (bytes.size() <= 4 || bytes[0] != binary_format || bytes[1] == 0 ||
+      bytes[1] >= std::size(codecs))
+    throw std::invalid_argument("invalid bridge ledger binary envelope");
+  const auto codec = codecs[bytes[1]];
+  const auto version = (static_cast<std::int64_t>(bytes[2]) << 8) | bytes[3];
+  if (version != codec_version(codec))
+    throw std::invalid_argument("unsupported bridge ledger codec version");
+  return {std::string{codec},
+          version,
+          {reinterpret_cast<const char *>(bytes.data() + 4), bytes.size() - 4}};
+}
+} // namespace
+
+// Ledger records use CBOR byte strings for nested codec values, not text.
 void to_json(nlohmann::json &j, const OpaqueValue &v) {
-  if (v.codec.empty() || v.version <= 0 || v.bytes.empty()) {
-    throw std::invalid_argument(
-        "ledger requires nonempty versioned opaque value");
-  }
-  std::string hex;
-  if (v.bytes.size() > hex.max_size() / 2) {
-    throw std::length_error("opaque storage envelope exceeds string limit");
-  }
-  hex.reserve(v.bytes.size() * 2);
-  constexpr char digits[] = "0123456789abcdef";
-  for (const unsigned char byte : v.bytes) {
-    hex.push_back(digits[byte >> 4]);
-    hex.push_back(digits[byte & 15]);
-  }
-  j = {{"storage_format", 1},
-       {"codec", v.codec},
-       {"version", v.version},
-       {"bytes_hex", std::move(hex)}};
+  j = nlohmann::json::binary(encode_value(v));
 }
 void from_json(const nlohmann::json &j, OpaqueValue &v) {
-  if (!j.is_object() || j.size() != 4 ||
-      !j.at("storage_format").is_number_integer() ||
-      j.at("storage_format") != 1 || !j.at("version").is_number_integer() ||
-      j.at("version") <= 0 ||
-      j.at("version") > std::numeric_limits<std::int64_t>::max()) {
-    throw std::invalid_argument("invalid opaque storage envelope");
-  }
-  auto codec = j.at("codec").get<std::string>();
-  const auto &hex = j.at("bytes_hex").get_ref<const std::string &>();
-  if (codec.empty() || hex.empty() || hex.size() % 2 != 0) {
-    throw std::invalid_argument("invalid opaque storage encoding");
-  }
-  const auto digit = [](char c) -> unsigned {
-    if (c >= '0' && c <= '9') {
-      return static_cast<unsigned>(c - '0');
-    }
-    if (c >= 'a' && c <= 'f') {
-      return static_cast<unsigned>(c - 'a' + 10);
-    }
-    throw std::invalid_argument("noncanonical opaque storage hex");
-  };
-  std::string bytes;
-  bytes.reserve(hex.size() / 2);
-  for (std::size_t i = 0; i < hex.size(); i += 2) {
-    bytes.push_back(
-        static_cast<char>((digit(hex[i]) << 4) | digit(hex[i + 1])));
-  }
-  v = {std::move(codec), j.at("version").get<std::int64_t>(), std::move(bytes)};
+  v = decode_value(j.get_binary());
 }
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Provenance, member_id, input_block)
 
@@ -163,12 +175,12 @@ namespace bridge {
 namespace {
 using Json = nlohmann::json;
 
-void require_v4(obcx::core::IDbConnection &db) {
+void require_current_ledger(obcx::core::IDbConnection &db) {
   const auto rows = db.query("SELECT version FROM bridge_schema_version;");
   if (rows.size() != 1 || db_int64(rows.front(), "version") !=
                               BridgeStateRepository::current_schema_version) {
-    throw std::runtime_error(
-        "bridge delivery ledger requires explicit schema 5");
+    throw std::runtime_error("bridge delivery ledger requires schema 6; older "
+                             "ledgers must be converted offline");
   }
 }
 void require_blob(const ledger::OpaqueValue &value) {
@@ -177,30 +189,73 @@ void require_blob(const ledger::OpaqueValue &value) {
         "ledger requires nonempty versioned opaque value");
   }
 }
-auto encode(const ledger::OpaqueValue &value) -> std::string {
-  require_blob(value);
-  return Json(value).dump();
+using obcx::core::DbBlob;
+auto encode(const ledger::OpaqueValue &value) -> DbBlob {
+  return ledger::encode_value(value);
+}
+constexpr std::array<std::uint8_t, 4> record_header{ledger::binary_format, 0, 0,
+                                                    1};
+template <class T> auto encode_record(const T &record) -> DbBlob {
+  DbBlob bytes(record_header.begin(), record_header.end());
+  Json::to_cbor(Json(record), bytes);
+  return bytes;
+}
+auto decode_record(const DbBlob &bytes) -> Json {
+  if (bytes.size() <= record_header.size() ||
+      !std::equal(record_header.begin(), record_header.end(), bytes.begin()))
+    throw std::invalid_argument("invalid bridge ledger record header");
+  return Json::from_cbor(bytes.begin() + record_header.size(), bytes.end());
+}
+auto db_blob(const obcx::core::DbRow &row, const std::string &column)
+    -> const DbBlob & {
+  return std::get<DbBlob>(row.at(column));
+}
+auto db_optional_blob(const obcx::core::DbRow &row, const std::string &column)
+    -> const DbBlob * {
+  const auto &value = row.at(column);
+  return std::holds_alternative<std::nullptr_t>(value)
+             ? nullptr
+             : &std::get<DbBlob>(value);
+}
+auto nullable_blob(const std::optional<ledger::OpaqueValue> &value)
+    -> obcx::core::DbValue {
+  return value ? obcx::core::DbValue{encode(*value)}
+               : obcx::core::DbValue{nullptr};
+}
+void require_blob_columns(obcx::core::IDbConnection &db,
+                          const std::string &table,
+                          std::initializer_list<std::string_view> names) {
+  const auto columns =
+      db.query("SELECT name,type FROM pragma_table_info(?);", {table});
+  for (const auto name : names) {
+    const auto column = std::ranges::find_if(columns, [&](const auto &row) {
+      return db_string(row, "name") == name;
+    });
+    if (column == columns.end() || db_string(*column, "type") != "BLOB")
+      throw std::runtime_error("bridge schema 6 requires BLOB column " + table +
+                               "." + std::string{name});
+  }
 }
 void create_source_operations(obcx::core::IDbConnection &db) {
   db.execute(R"(
     CREATE TABLE bridge_source_operations (
       delivery_id TEXT NOT NULL, operation_id TEXT NOT NULL,
-      member_id TEXT NOT NULL, message_ref TEXT NOT NULL,
-      anchor_ref TEXT NOT NULL, data TEXT NOT NULL,
+      member_id TEXT NOT NULL, message_ref BLOB NOT NULL,
+      anchor_ref BLOB NOT NULL, data BLOB NOT NULL,
       PRIMARY KEY(delivery_id, operation_id)
-    );
+    ) STRICT;
   )");
 }
 void create_command_operations(obcx::core::IDbConnection &db) {
   db.execute(R"(
     CREATE TABLE bridge_command_operations (
       pair_id TEXT NOT NULL, operation_id TEXT NOT NULL,
-      kind TEXT NOT NULL, command_ref TEXT NOT NULL,
-      source_delivery_id TEXT, source_anchor_ref TEXT, data TEXT NOT NULL,
+      kind TEXT NOT NULL, command_ref BLOB NOT NULL,
+      source_delivery_id TEXT, source_anchor_ref BLOB, data BLOB NOT NULL,
       PRIMARY KEY(pair_id, operation_id),
       UNIQUE(pair_id, command_ref, kind),
       CHECK((source_delivery_id IS NULL) = (source_anchor_ref IS NULL))
-    );
+    ) STRICT;
   )");
 }
 constexpr auto confirmed_output_rows_sql =
@@ -208,8 +263,6 @@ constexpr auto confirmed_output_rows_sql =
     "bridge_delivery_outputs UNION ALL SELECT delivery_id,message_ref,data,"
     "NULL AS attempt_id,revision_id FROM bridge_revision_outputs)";
 auto validation_output_rows(obcx::core::IDbConnection &db) -> std::string {
-  // Explicit upgrades validate predecessor schemas before revision tables
-  // exist.
   return db.query("SELECT name FROM sqlite_master WHERE type='table' AND "
                   "name='bridge_revision_outputs';")
                  .empty()
@@ -224,10 +277,10 @@ auto original_delivery_state(obcx::core::IDbConnection &db,
        db.query("SELECT attempt_id,result FROM bridge_delivery_attempts WHERE "
                 "delivery_id=? ORDER BY sequence;",
                 {id})) {
-    const auto result = db_optional_string(row, "result");
+    const auto result = db_optional_blob(row, "result");
     if (!result)
       return ledger::DeliveryState::Uncertain;
-    const auto outcome = Json::parse(*result).get<ledger::AttemptResult>();
+    const auto outcome = decode_record(*result).get<ledger::AttemptResult>();
     const auto confirmed =
         db.query("SELECT message_ref FROM bridge_delivery_outputs WHERE "
                  "delivery_id=? AND attempt_id=?;",
@@ -266,56 +319,63 @@ void suppress_unresolved_revision_retries(obcx::core::IDbConnection &db,
 auto revision_snapshots(obcx::core::IDbConnection &db, const std::string &id)
     -> std::vector<ledger::RevisionSnapshot>;
 
-void create_v4_ledger(obcx::core::IDbConnection &db) {
+void create_delivery_ledger(obcx::core::IDbConnection &db) {
   create_revision_ledger(db);
   create_source_operations(db);
   create_command_operations(db);
   db.execute(R"(
     CREATE TABLE bridge_deliveries (
       delivery_id TEXT PRIMARY KEY NOT NULL,
-      admission TEXT NOT NULL,
+      admission BLOB NOT NULL,
       legacy_unknown INTEGER NOT NULL CHECK(legacy_unknown = 0),
-      quote_anchor TEXT,
+      quote_anchor BLOB,
       spent_attempts INTEGER NOT NULL CHECK(spent_attempts >= 0)
-    );
+    ) STRICT;
   )");
   db.execute(R"(
     CREATE TABLE bridge_delivery_members (
       delivery_id TEXT NOT NULL, member_id TEXT NOT NULL,
-      pair_id TEXT NOT NULL, source_scope TEXT NOT NULL,
-      target_scope TEXT NOT NULL, message_ref TEXT NOT NULL, data TEXT NOT NULL,
+      pair_id TEXT NOT NULL, source_scope BLOB NOT NULL,
+      target_scope BLOB NOT NULL, message_ref BLOB NOT NULL,
+      media_group_ref BLOB, data BLOB NOT NULL,
       PRIMARY KEY(delivery_id, member_id),
       UNIQUE(pair_id, source_scope, target_scope, message_ref)
-    );
+    ) STRICT;
   )");
+  db.execute("CREATE INDEX bridge_delivery_members_album ON "
+             "bridge_delivery_members(pair_id,source_scope,target_scope,media_"
+             "group_ref);");
   db.execute(R"(
     CREATE TABLE bridge_delivery_attempts (
       delivery_id TEXT NOT NULL, attempt_id TEXT NOT NULL,
       sequence INTEGER NOT NULL CHECK(sequence > 0),
-      started_at_ms INTEGER NOT NULL, result TEXT,
+      started_at_ms INTEGER NOT NULL, result BLOB,
+      complete INTEGER CHECK(complete IN (0,1)),
+      CHECK((result IS NULL) = (complete IS NULL)),
       PRIMARY KEY(delivery_id, attempt_id), UNIQUE(delivery_id, sequence)
-    );
+    ) STRICT;
   )");
   db.execute(R"(
     CREATE TABLE bridge_delivery_outputs (
       delivery_id TEXT NOT NULL, attempt_id TEXT NOT NULL,
-      message_ref TEXT NOT NULL, ordinal INTEGER CHECK(ordinal >= 0),
-      data TEXT NOT NULL,
+      message_ref BLOB NOT NULL, ordinal INTEGER CHECK(ordinal >= 0),
+      data BLOB NOT NULL,
       PRIMARY KEY(delivery_id, message_ref),
       UNIQUE(delivery_id, attempt_id, ordinal)
-    );
+    ) STRICT;
   )");
   db.execute(R"(
     CREATE TABLE bridge_output_operations (
       delivery_id TEXT NOT NULL, operation_id TEXT NOT NULL,
-      message_ref TEXT NOT NULL, data TEXT NOT NULL,
+      message_ref BLOB NOT NULL, data BLOB NOT NULL,
       PRIMARY KEY(delivery_id, operation_id)
-    );
+    ) STRICT;
   )");
   db.execute(R"(
     CREATE TABLE bridge_delivery_retries (
-      delivery_id TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL
-    );
+      delivery_id TEXT PRIMARY KEY NOT NULL, payload BLOB NOT NULL,
+      next_retry_at_ms INTEGER NOT NULL
+    ) STRICT;
   )");
   create_album_observations(db);
 }
@@ -340,16 +400,16 @@ void require_unique_key(obcx::core::IDbConnection &db, const std::string &table,
   throw std::runtime_error("ledger unique identity constraint missing in " +
                            table);
 }
-void validate_v4_base_ledger(obcx::core::IDbConnection &db) {
+void validate_base_ledger(obcx::core::IDbConnection &db) {
   require_columns(db, "bridge_deliveries",
                   {"delivery_id", "admission", "legacy_unknown", "quote_anchor",
                    "spent_attempts"});
   require_columns(db, "bridge_delivery_members",
                   {"delivery_id", "member_id", "pair_id", "source_scope",
-                   "target_scope", "message_ref", "data"});
-  require_columns(
-      db, "bridge_delivery_attempts",
-      {"delivery_id", "attempt_id", "sequence", "started_at_ms", "result"});
+                   "target_scope", "message_ref", "media_group_ref", "data"});
+  require_columns(db, "bridge_delivery_attempts",
+                  {"delivery_id", "attempt_id", "sequence", "started_at_ms",
+                   "result", "complete"});
   require_columns(
       db, "bridge_delivery_outputs",
       {"delivery_id", "attempt_id", "message_ref", "ordinal", "data"});
@@ -364,7 +424,16 @@ void validate_v4_base_ledger(obcx::core::IDbConnection &db) {
   }
   require_columns(db, "bridge_output_operations",
                   {"delivery_id", "operation_id", "message_ref", "data"});
-  require_columns(db, "bridge_delivery_retries", {"delivery_id", "payload"});
+  require_columns(db, "bridge_delivery_retries",
+                  {"delivery_id", "payload", "next_retry_at_ms"});
+  require_blob_columns(db, "bridge_deliveries", {"admission", "quote_anchor"});
+  require_blob_columns(db, "bridge_delivery_members",
+                       {"source_scope", "target_scope", "message_ref",
+                        "media_group_ref", "data"});
+  require_blob_columns(db, "bridge_delivery_attempts", {"result"});
+  require_blob_columns(db, "bridge_delivery_outputs", {"message_ref", "data"});
+  require_blob_columns(db, "bridge_output_operations", {"message_ref", "data"});
+  require_blob_columns(db, "bridge_delivery_retries", {"payload"});
   require_unique_key(db, "bridge_deliveries", {"delivery_id"});
   require_unique_key(db, "bridge_delivery_members",
                      {"delivery_id", "member_id"});
@@ -401,8 +470,8 @@ void validate_v4_base_ledger(obcx::core::IDbConnection &db) {
     throw std::runtime_error("physical output has no admitted attempt");
   }
 }
-void validate_v4_source_ledger(obcx::core::IDbConnection &db) {
-  validate_v4_base_ledger(db);
+void validate_source_ledger(obcx::core::IDbConnection &db) {
+  validate_base_ledger(db);
   if (db.query("SELECT name FROM sqlite_master WHERE type='table' AND "
                "name='bridge_source_operations';")
           .empty())
@@ -411,6 +480,8 @@ void validate_v4_source_ledger(obcx::core::IDbConnection &db) {
   require_columns(db, "bridge_source_operations",
                   {"delivery_id", "operation_id", "member_id", "message_ref",
                    "anchor_ref", "data"});
+  require_blob_columns(db, "bridge_source_operations",
+                       {"message_ref", "anchor_ref", "data"});
   require_unique_key(db, "bridge_source_operations",
                      {"delivery_id", "operation_id"});
   if (!db.query(std::string{
@@ -429,8 +500,8 @@ void validate_v4_source_ledger(obcx::core::IDbConnection &db) {
            .empty())
     throw std::runtime_error("orphaned source operation evidence");
 }
-void validate_v4_command_ledger(obcx::core::IDbConnection &db) {
-  validate_v4_source_ledger(db);
+void validate_command_ledger(obcx::core::IDbConnection &db) {
+  validate_source_ledger(db);
   if (db.query("SELECT name FROM sqlite_master WHERE type='table' AND "
                "name='bridge_command_operations';")
           .empty())
@@ -439,6 +510,8 @@ void validate_v4_command_ledger(obcx::core::IDbConnection &db) {
   require_columns(db, "bridge_command_operations",
                   {"pair_id", "operation_id", "kind", "command_ref",
                    "source_delivery_id", "source_anchor_ref", "data"});
+  require_blob_columns(db, "bridge_command_operations",
+                       {"command_ref", "source_anchor_ref", "data"});
   require_unique_key(db, "bridge_command_operations",
                      {"pair_id", "operation_id"});
   require_unique_key(db, "bridge_command_operations",
@@ -459,8 +532,8 @@ void validate_v4_command_ledger(obcx::core::IDbConnection &db) {
            .empty())
     throw std::runtime_error("orphaned command source binding");
 }
-void validate_v4_ledger(obcx::core::IDbConnection &db) {
-  validate_v4_command_ledger(db);
+void validate_ledger(obcx::core::IDbConnection &db) {
+  validate_command_ledger(db);
   validate_revision_ledger(db);
   validate_album_observations(db);
 }
@@ -480,7 +553,7 @@ auto admission_from_db(obcx::core::IDbConnection &db, const std::string &id)
     throw std::runtime_error(
         "legacy delivery refs unresolved; no sends or retries permitted");
   }
-  return Json::parse(db_string(row, "admission")).get<ledger::Admission>();
+  return decode_record(db_blob(row, "admission")).get<ledger::Admission>();
 }
 void add_members(obcx::core::IDbConnection &db,
                  const ledger::Admission &admission,
@@ -507,36 +580,41 @@ void add_members(obcx::core::IDbConnection &db,
              .empty())
       throw std::runtime_error(
           "observed album association does not authorize source admission");
-    const auto serialized = Json(member).dump();
+    const auto serialized = encode_record(member);
     const auto existing = db.query("SELECT data FROM bridge_delivery_members "
                                    "WHERE delivery_id=? AND member_id=?;",
                                    {admission.delivery_id, member.member_id});
     if (!existing.empty()) {
-      if (db_string(existing.front(), "data") != serialized) {
+      if (db_blob(existing.front(), "data") != serialized) {
         throw std::runtime_error("conflicting source member replay");
       }
       continue;
     }
     db.execute("INSERT INTO "
                "bridge_delivery_members(delivery_id,member_id,pair_id,source_"
-               "scope,target_scope,message_ref,data) VALUES(?,?,?,?,?,?,?);",
+               "scope,target_scope,message_ref,media_group_ref,data) "
+               "VALUES(?,?,?,?,?,?,?,?);",
                {admission.delivery_id, member.member_id, admission.pair_id,
                 encode(admission.source_scope), encode(admission.target_scope),
-                encode(member.message_ref), serialized});
+                encode(member.message_ref),
+                nullable_blob(member.media_group_ref), serialized});
   }
 }
 auto has_album(obcx::core::IDbConnection &db, const std::string &pair,
                const ledger::OpaqueValue &source,
                const ledger::OpaqueValue &target,
                const ledger::OpaqueValue &group) -> bool {
-  // Canonical opaque JSON is stored by this owner, not parsed as a native
-  // media_group_id. LIMIT bounds the returned rows; malformed stored JSON
-  // fails the query rather than turning corruption into a cache miss.
-  return !db.query("SELECT 1 FROM bridge_delivery_members WHERE pair_id=? "
-                   "AND source_scope=? AND target_scope=? "
-                   "AND json_extract(data,'$.media_group_ref')=? LIMIT 1;",
-                   {pair, encode(source), encode(target), encode(group)})
-              .empty();
+  const auto rows = db.query(
+      "SELECT data FROM bridge_delivery_members WHERE pair_id=? "
+      "AND source_scope=? AND target_scope=? AND media_group_ref=? LIMIT 1;",
+      {pair, encode(source), encode(target), encode(group)});
+  if (rows.empty())
+    return false;
+  if (decode_record(db_blob(rows.front(), "data"))
+          .get<ledger::SourceMember>()
+          .media_group_ref != std::optional{group})
+    throw std::runtime_error("album member index mismatch");
+  return true;
 }
 auto admit(obcx::core::IDbConnection &db, const ledger::Admission &admission)
     -> ledger::AdmissionResult {
@@ -555,12 +633,12 @@ auto admit(obcx::core::IDbConnection &db, const ledger::Admission &admission)
       throw std::invalid_argument("duplicate source member in admission");
     }
   }
-  const auto serialized = Json(admission).dump();
+  const auto serialized = encode_record(admission);
   const auto existing =
       db.query("SELECT admission FROM bridge_deliveries WHERE delivery_id=?;",
                {admission.delivery_id});
   if (!existing.empty()) {
-    if (db_optional_string(existing.front(), "admission") != serialized) {
+    if (db_blob(existing.front(), "admission") != serialized) {
       throw std::runtime_error("conflicting delivery admission replay");
     }
     return ledger::AdmissionResult::AlreadyExists;
@@ -594,17 +672,17 @@ auto safe_retry(obcx::core::IDbConnection &db,
     return false;
   }
   for (const auto &attempt : attempts) {
-    const auto serialized = db_optional_string(attempt, "result");
+    const auto serialized = db_optional_blob(attempt, "result");
     if (!serialized) {
       return false;
     }
-    const auto result = Json::parse(*serialized).get<ledger::AttemptResult>();
+    const auto result = decode_record(*serialized).get<ledger::AttemptResult>();
     if (result.effect != ledger::Effect::DefinitelyNotSubmitted ||
         result.complete || !result.outputs.empty()) {
       return false;
     }
   }
-  return Json::parse(db_string(attempts.back(), "result"))
+  return decode_record(db_blob(attempts.back(), "result"))
       .get<ledger::AttemptResult>()
       .retryable;
 }
@@ -657,9 +735,9 @@ void merge_output(obcx::core::IDbConnection &db, const std::string &id,
                   "o.delivery_id!=?;",
                   {ref, id})) {
       const auto other =
-          Json::parse(db_string(row, "admission")).get<ledger::Admission>();
+          decode_record(db_blob(row, "admission")).get<ledger::Admission>();
       const auto physical =
-          Json::parse(db_string(row, "data")).get<ledger::PhysicalOutput>();
+          decode_record(db_blob(row, "data")).get<ledger::PhysicalOutput>();
       if (physical.reverse_primary_member &&
           other.pair_id == admission.pair_id &&
           other.source_scope == admission.source_scope &&
@@ -681,7 +759,7 @@ void merge_output(obcx::core::IDbConnection &db, const std::string &id,
       if (rows.empty()) {
         throw std::invalid_argument("provenance member missing");
       }
-      const auto member = Json::parse(db_string(rows.front(), "data"))
+      const auto member = decode_record(db_blob(rows.front(), "data"))
                               .get<ledger::SourceMember>();
       if (std::find(member.input_blocks.begin(), member.input_blocks.end(),
                     origin.input_block) == member.input_blocks.end()) {
@@ -694,14 +772,14 @@ void merge_output(obcx::core::IDbConnection &db, const std::string &id,
                "delivery_id=? AND message_ref=?;",
                {id, ref});
   if (rows.empty()) {
-    db.execute(
-        "INSERT INTO "
-        "bridge_delivery_outputs(delivery_id,attempt_id,message_ref,"
-        "ordinal,data) VALUES(?,?,?,?,?);",
-        {id, attempt, ref, ordinal_value(output.ordinal), Json(output).dump()});
+    db.execute("INSERT INTO "
+               "bridge_delivery_outputs(delivery_id,attempt_id,message_ref,"
+               "ordinal,data) VALUES(?,?,?,?,?);",
+               {id, attempt, ref, ordinal_value(output.ordinal),
+                encode_record(output)});
     return;
   }
-  auto merged = Json::parse(db_string(rows.front(), "data"))
+  auto merged = decode_record(db_blob(rows.front(), "data"))
                     .get<ledger::PhysicalOutput>();
   const bool incoming_provenance_is_known =
       merged.provenance && output.provenance &&
@@ -753,7 +831,7 @@ void merge_output(obcx::core::IDbConnection &db, const std::string &id,
   db.execute(
       "UPDATE bridge_delivery_outputs SET ordinal=?,data=? WHERE delivery_id=? "
       "AND message_ref=?;",
-      {ordinal_value(merged.ordinal), Json(merged).dump(), id, ref});
+      {ordinal_value(merged.ordinal), encode_record(merged), id, ref});
 }
 void validate_retry(const ledger::Admission &admission,
                     const ledger::RetryPayload &payload) {
@@ -828,7 +906,7 @@ auto BridgeStateRepository::admit_delivery(const ledger::Admission &admission)
     -> ledger::AdmissionResult {
   return db_manager_.run_transaction<ledger::AdmissionResult>(
       db_instance_, [&](obcx::core::IDbConnection &db) {
-        require_v4(db);
+        require_current_ledger(db);
         return admit(db, admission);
       });
 }
@@ -838,7 +916,7 @@ auto BridgeStateRepository::has_album_delivery(
     -> bool {
   return db_manager_.run_transaction<bool>(
       db_instance_, [&](obcx::core::IDbConnection &db) {
-        require_v4(db);
+        require_current_ledger(db);
         return has_album(db, pair, source, target, group);
       });
 }
@@ -848,7 +926,7 @@ auto BridgeStateRepository::admit_album_delivery(
     -> ledger::AdmissionResult {
   return db_manager_.run_transaction<ledger::AdmissionResult>(
       db_instance_, [&](obcx::core::IDbConnection &db) {
-        require_v4(db);
+        require_current_ledger(db);
         if (admission.members.empty() ||
             !admission.members.front().media_group_ref)
           throw std::invalid_argument(
@@ -882,7 +960,7 @@ void BridgeStateRepository::append_delivery_members(
     const std::string &id, const std::vector<ledger::SourceMember> &members) {
   db_manager_.run_transaction<void>(
       db_instance_, [&](obcx::core::IDbConnection &db) {
-        require_v4(db);
+        require_current_ledger(db);
         if (!attempt_rows(db, id).empty()) {
           for (const auto &member : members) {
             if (db.query("SELECT member_id FROM bridge_delivery_members WHERE "
@@ -902,7 +980,7 @@ void BridgeStateRepository::attach_proven_member(
     const ledger::SourceMember &member, const ledger::PhysicalOutput &output) {
   db_manager_.run_transaction<void>(
       db_instance_, [&](obcx::core::IDbConnection &db) {
-        require_v4(db);
+        require_current_ledger(db);
         const auto admission = admission_from_db(db, id);
         (void)require_attempt(db, id, attempt);
         if (!output.provenance ||
@@ -935,14 +1013,14 @@ void BridgeStateRepository::attach_proven_member(
                                      {id, encode(output.message_ref)});
           if (rows.size() != 1)
             throw std::runtime_error("mutated output evidence disappeared");
-          const auto current = Json::parse(db_string(rows.front(), "data"))
+          const auto current = decode_record(db_blob(rows.front(), "data"))
                                    .get<ledger::PhysicalOutput>();
           const auto members =
               db.query("SELECT data FROM bridge_delivery_members WHERE "
                        "delivery_id=? AND member_id=?;",
                        {id, member.member_id});
           if (members.size() != 1 ||
-              Json::parse(db_string(members.front(), "data"))
+              decode_record(db_blob(members.front(), "data"))
                       .get<ledger::SourceMember>() != member ||
               !current.provenance ||
               std::ranges::any_of(*output.provenance, [&](const auto &origin) {
@@ -963,7 +1041,7 @@ auto BridgeStateRepository::admit_attempt(const std::string &id,
   AttemptRegistration registration{*this, id, attempt, false, false};
   const auto written = db_manager_.run_transaction<ledger::AdmissionResult>(
       db_instance_, [&](obcx::core::IDbConnection &db) {
-        require_v4(db);
+        require_current_ledger(db);
         if (attempt.empty()) {
           throw std::invalid_argument("empty attempt identity");
         }
@@ -1007,7 +1085,7 @@ auto BridgeStateRepository::admit_retry_attempt(
                                    attempt, false, false};
   const auto written = db_manager_.run_transaction<ledger::AdmissionResult>(
       db_instance_, [&](obcx::core::IDbConnection &db) {
-        require_v4(db);
+        require_current_ledger(db);
         const auto &id = expected_admission.delivery_id;
         if (attempt.empty() || admission_from_db(db, id) != expected_admission)
           throw std::runtime_error("retry admission changed or missing");
@@ -1016,7 +1094,7 @@ auto BridgeStateRepository::admit_retry_attempt(
             "SELECT payload FROM bridge_delivery_retries WHERE delivery_id=?;",
             {id});
         if (rows.size() != 1 ||
-            Json::parse(db_string(rows.front(), "payload"))
+            decode_record(db_blob(rows.front(), "payload"))
                     .get<ledger::RetryPayload>() != expected_payload)
           throw std::runtime_error("retry payload changed or missing");
         if (!db.query(
@@ -1053,7 +1131,7 @@ void BridgeStateRepository::record_confirmation(
     const ledger::PhysicalOutput &output) {
   db_manager_.run_transaction<void>(
       db_instance_, [&](obcx::core::IDbConnection &db) {
-        require_v4(db);
+        require_current_ledger(db);
         (void)admission_from_db(db, id);
         (void)require_attempt(db, id, attempt);
         // Contradictory late confirmations are
@@ -1078,7 +1156,7 @@ auto BridgeStateRepository::finish_attempt(
   const auto written = db_manager_.run_transaction<
       ledger::AdmissionResult>(db_instance_, [&](obcx::core::IDbConnection
                                                      &db) {
-    require_v4(db);
+    require_current_ledger(db);
     const auto admission = admission_from_db(db, id);
     require_blob(result.outcome);
     if ((result.effect == ledger::Effect::ConfirmedOnly &&
@@ -1096,15 +1174,15 @@ auto BridgeStateRepository::finish_attempt(
           "inconsistent attempt effect/completeness/retry evidence");
     }
     const auto row = require_attempt(db, id, attempt);
-    const auto serialized = Json(result).dump();
-    const auto previous = db_optional_string(row, "result");
+    const auto serialized = encode_record(result);
+    const auto previous = db_optional_blob(row, "result");
     if (previous) {
       if (*previous != serialized) {
         throw std::runtime_error("conflicting terminal attempt result");
       }
       return ledger::AdmissionResult::AlreadyExists;
     }
-    std::unordered_set<std::string> refs;
+    std::set<DbBlob> refs;
     std::int64_t expected_ordinal = 0;
     for (const auto &output : result.outputs) {
       if (result.complete &&
@@ -1132,8 +1210,8 @@ auto BridgeStateRepository::finish_attempt(
               .empty()) {
         throw std::invalid_argument("quote anchor is not a confirmed output");
       }
-      const auto current =
-          db_optional_string(delivery_row(db, id), "quote_anchor");
+      const auto delivery = delivery_row(db, id);
+      const auto current = db_optional_blob(delivery, "quote_anchor");
       if (current && *current != anchor) {
         throw std::runtime_error("conflicting explicit quote anchor");
       }
@@ -1141,9 +1219,9 @@ auto BridgeStateRepository::finish_attempt(
           "UPDATE bridge_deliveries SET quote_anchor=? WHERE delivery_id=?;",
           {anchor, id});
     }
-    db.execute("UPDATE bridge_delivery_attempts SET result=? WHERE "
+    db.execute("UPDATE bridge_delivery_attempts SET result=?,complete=? WHERE "
                "delivery_id=? AND attempt_id=?;",
-               {serialized, id, attempt});
+               {serialized, std::int64_t{result.complete}, id, attempt});
     if (retry) {
       validate_retry(admission, *retry);
       const auto rows = db.query(
@@ -1152,7 +1230,7 @@ auto BridgeStateRepository::finish_attempt(
       if (rows.size() != 1)
         throw std::runtime_error(
             "retry body was not persisted before submission");
-      const auto previous = Json::parse(db_string(rows.front(), "payload"))
+      const auto previous = decode_record(db_blob(rows.front(), "payload"))
                                 .get<ledger::RetryPayload>();
       if (previous.body != retry->body ||
           previous.target_scope != retry->target_scope ||
@@ -1166,9 +1244,9 @@ auto BridgeStateRepository::finish_attempt(
       // Keep BOTH observations; do not roll back the outcome merely because
       // this contradiction now forbids retry scheduling.
       if (safe_retry(db, admission))
-        db.execute(
-            "UPDATE bridge_delivery_retries SET payload=? WHERE delivery_id=?;",
-            {Json(*retry).dump(), id});
+        db.execute("UPDATE bridge_delivery_retries SET "
+                   "payload=?,next_retry_at_ms=? WHERE delivery_id=?;",
+                   {encode_record(*retry), retry->next_retry_at_ms, id});
     }
     return ledger::AdmissionResult::Created;
   });
@@ -1194,7 +1272,7 @@ auto BridgeStateRepository::load_delivery(const std::string &id) const
       db_instance_,
       [&](obcx::core::IDbConnection &db)
           -> std::optional<ledger::DeliverySnapshot> {
-        require_v4(db);
+        require_current_ledger(db);
         const auto rows = db.query(
             "SELECT * FROM bridge_deliveries WHERE delivery_id=?;", {id});
         if (rows.empty()) {
@@ -1212,30 +1290,29 @@ auto BridgeStateRepository::load_delivery(const std::string &id) const
                       "delivery_id=? ORDER BY member_id;",
                       {id})) {
           snapshot.members.push_back(
-              Json::parse(db_string(row, "data")).get<ledger::SourceMember>());
+              decode_record(db_blob(row, "data")).get<ledger::SourceMember>());
         }
         for (const auto &row :
              db.query("SELECT data FROM bridge_delivery_outputs WHERE "
                       "delivery_id=? ORDER BY attempt_id,ordinal;",
                       {id})) {
-          snapshot.outputs.push_back(Json::parse(db_string(row, "data"))
+          snapshot.outputs.push_back(decode_record(db_blob(row, "data"))
                                          .get<ledger::PhysicalOutput>());
         }
-        const auto anchor = db_optional_string(rows.front(), "quote_anchor");
+        const auto anchor = db_optional_blob(rows.front(), "quote_anchor");
         if (anchor) {
-          snapshot.quote_anchor =
-              Json::parse(*anchor).get<ledger::OpaqueValue>();
+          snapshot.quote_anchor = ledger::decode_value(*anchor);
         }
         const auto attempts = attempt_rows(db, id);
         for (const auto &row : attempts) {
-          const auto result = db_optional_string(row, "result");
+          const auto result = db_optional_blob(row, "result");
           snapshot.attempts.push_back(
               {db_string(row, "attempt_id"), db_int64(row, "sequence"),
                db_int64(row, "started_at_ms"),
                result
                    ? std::optional<
                          ledger::
-                             AttemptResult>{Json::parse(*result)
+                             AttemptResult>{decode_record(*result)
                                                 .get<ledger::AttemptResult>()}
                    : std::nullopt});
         }
@@ -1244,7 +1321,7 @@ auto BridgeStateRepository::load_delivery(const std::string &id) const
                       "delivery_id=? ORDER BY operation_id;",
                       {id})) {
           snapshot.output_operations.push_back(
-              Json::parse(db_string(row, "data"))
+              decode_record(db_blob(row, "data"))
                   .get<ledger::OutputOperation>());
         }
         for (const auto &row :
@@ -1253,16 +1330,16 @@ auto BridgeStateRepository::load_delivery(const std::string &id) const
                       "bridge_source_operations WHERE delivery_id=? ORDER BY "
                       "operation_id;",
                       {id})) {
-          const auto serialized = db_string(row, "data");
+          const auto &serialized = db_blob(row, "data");
           auto operation =
-              Json::parse(serialized).get<ledger::SourceOperation>();
+              decode_record(serialized).get<ledger::SourceOperation>();
           require_blob(operation.result);
           if (operation.operation_id.empty() || operation.member_id.empty() ||
               operation.operation_id != db_string(row, "operation_id") ||
               operation.member_id != db_string(row, "member_id") ||
-              encode(operation.message_ref) != db_string(row, "message_ref") ||
-              encode(operation.anchor_ref) != db_string(row, "anchor_ref") ||
-              Json(operation).dump() != serialized)
+              encode(operation.message_ref) != db_blob(row, "message_ref") ||
+              encode(operation.anchor_ref) != db_blob(row, "anchor_ref") ||
+              encode_record(operation) != serialized)
             throw std::runtime_error("conflicting source operation snapshot");
           snapshot.source_operations.push_back(std::move(operation));
         }
@@ -1279,7 +1356,7 @@ auto BridgeStateRepository::load_delivery(const std::string &id) const
             "SELECT payload FROM bridge_delivery_retries WHERE delivery_id=?;",
             {id});
         if (!retries.empty()) {
-          snapshot.retry = Json::parse(db_string(retries.front(), "payload"))
+          snapshot.retry = decode_record(db_blob(retries.front(), "payload"))
                                .get<ledger::RetryPayload>();
         }
         return snapshot;
@@ -1291,7 +1368,7 @@ auto BridgeStateRepository::resolve_delivery(
     -> ledger::Resolution {
   return db_manager_.run_read<
       ledger::Resolution>(db_instance_, [&](obcx::core::IDbConnection &db) {
-    require_v4(db);
+    require_current_ledger(db);
     ledger::Resolution resolution{ledger::ResolutionStatus::Missing, {}, {}};
     try {
       const auto rows = db.query(
@@ -1307,7 +1384,7 @@ auto BridgeStateRepository::resolve_delivery(
           {pair, encode(source), encode(target), encode(message)});
       for (const auto &row : rows) {
         const auto admission =
-            Json::parse(db_string(row, "admission")).get<ledger::Admission>();
+            decode_record(db_blob(row, "admission")).get<ledger::Admission>();
         if (admission.delivery_id != db_string(row, "delivery_id") ||
             admission.pair_id != pair || admission.source_scope != source ||
             admission.target_scope != target) {
@@ -1339,7 +1416,7 @@ auto BridgeStateRepository::resolve_source_delivery(
     const ledger::OpaqueValue &message) const -> ledger::Resolution {
   return db_manager_.run_read<
       ledger::Resolution>(db_instance_, [&](obcx::core::IDbConnection &db) {
-    require_v4(db);
+    require_current_ledger(db);
     ledger::Resolution result{ledger::ResolutionStatus::Missing, {}, {}};
     try {
       const auto rows = db.query(
@@ -1355,10 +1432,10 @@ auto BridgeStateRepository::resolve_source_delivery(
           {pair, encode(source), encode(message)});
       for (const auto &row : rows) {
         const auto admission =
-            Json::parse(db_string(row, "admission")).get<ledger::Admission>();
+            decode_record(db_blob(row, "admission")).get<ledger::Admission>();
         if (admission.delivery_id != db_string(row, "delivery_id") ||
             admission.pair_id != pair || admission.source_scope != source ||
-            encode(admission.target_scope) != db_string(row, "target_scope"))
+            encode(admission.target_scope) != db_blob(row, "target_scope"))
           throw std::runtime_error("inconsistent source admission");
         if (db_int64(row, "association") != 0) {
           const auto aliases = album_observations(db, admission.delivery_id);
@@ -1384,7 +1461,7 @@ void BridgeStateRepository::store_retry_payload(
     const std::string &id, const ledger::RetryPayload &payload) {
   db_manager_.run_transaction<void>(db_instance_, [&](obcx::core::IDbConnection
                                                           &db) {
-    require_v4(db);
+    require_current_ledger(db);
     const auto admission = admission_from_db(db, id);
     validate_retry(admission, payload);
     // Preparation may persist leases/body before the first attempt; scheduling
@@ -1398,7 +1475,7 @@ void BridgeStateRepository::store_retry_payload(
         "SELECT payload FROM bridge_delivery_retries WHERE delivery_id=?;",
         {id});
     if (!existing.empty()) {
-      const auto previous = Json::parse(db_string(existing.front(), "payload"))
+      const auto previous = decode_record(db_blob(existing.front(), "payload"))
                                 .get<ledger::RetryPayload>();
       if (previous.body != payload.body ||
           previous.target_scope != payload.target_scope ||
@@ -1410,9 +1487,12 @@ void BridgeStateRepository::store_retry_payload(
       }
     }
     db.execute(
-        "INSERT INTO bridge_delivery_retries(delivery_id,payload) VALUES(?,?) "
-        "ON CONFLICT(delivery_id) DO UPDATE SET payload=excluded.payload;",
-        {id, Json(payload).dump()});
+        "INSERT INTO "
+        "bridge_delivery_retries(delivery_id,payload,next_retry_at_ms) "
+        "VALUES(?,?,?) "
+        "ON CONFLICT(delivery_id) DO UPDATE SET "
+        "payload=excluded.payload,next_retry_at_ms=excluded.next_retry_at_ms;",
+        {id, encode_record(payload), payload.next_retry_at_ms});
   });
 }
 auto BridgeStateRepository::resolve_observed_output(
@@ -1420,7 +1500,7 @@ auto BridgeStateRepository::resolve_observed_output(
     const ledger::OpaqueValue &output_ref) const -> ledger::Resolution {
   return db_manager_.run_transaction<
       ledger::Resolution>(db_instance_, [&](obcx::core::IDbConnection &db) {
-    require_v4(db);
+    require_current_ledger(db);
     require_blob(scope);
     require_blob(output_ref);
     ledger::Resolution resolution{ledger::ResolutionStatus::Missing, {}, {}};
@@ -1434,14 +1514,14 @@ auto BridgeStateRepository::resolve_observed_output(
                {encode(output_ref)})) {
         const auto id = db_string(row, "delivery_id");
         const auto admission =
-            Json::parse(db_string(row, "admission")).get<ledger::Admission>();
+            decode_record(db_blob(row, "admission")).get<ledger::Admission>();
         if (admission.delivery_id != id)
           throw std::runtime_error(
               "observed output admission identity mismatch");
         if (admission.pair_id != pair || admission.target_scope != scope)
           continue;
         const auto output =
-            Json::parse(db_string(row, "data")).get<ledger::PhysicalOutput>();
+            decode_record(db_blob(row, "data")).get<ledger::PhysicalOutput>();
         if (output.message_ref != output_ref)
           throw std::runtime_error("observed output row evidence mismatch");
         resolution.delivery_ids.push_back(id);
@@ -1467,7 +1547,7 @@ auto BridgeStateRepository::resolve_reverse_primary(
   return db_manager_.run_transaction<
       ledger::OwnershipResolution>(db_instance_, [&](obcx::core::IDbConnection
                                                          &db) {
-    require_v4(db);
+    require_current_ledger(db);
     require_blob(source);
     require_blob(target);
     require_blob(output_ref);
@@ -1485,7 +1565,7 @@ auto BridgeStateRepository::resolve_reverse_primary(
                    "d.delivery_id=o.delivery_id WHERE o.message_ref=?;",
                {encode(output_ref)})) {
         const auto admission =
-            Json::parse(db_string(row, "admission")).get<ledger::Admission>();
+            decode_record(db_blob(row, "admission")).get<ledger::Admission>();
         if (admission.delivery_id != db_string(row, "delivery_id"))
           throw std::runtime_error(
               "reverse-primary admission identity mismatch");
@@ -1494,7 +1574,7 @@ auto BridgeStateRepository::resolve_reverse_primary(
         ++observed;
         resolution.observed_output = true;
         const auto output =
-            Json::parse(db_string(row, "data")).get<ledger::PhysicalOutput>();
+            decode_record(db_blob(row, "data")).get<ledger::PhysicalOutput>();
         if (output.message_ref != output_ref)
           throw std::runtime_error("reverse-primary output evidence mismatch");
         if (admission.source_scope != source)
@@ -1510,7 +1590,7 @@ auto BridgeStateRepository::resolve_reverse_primary(
           throw std::runtime_error("reverse-primary member missing or corrupt");
         }
         const auto &member_row = members.front();
-        auto member = Json::parse(db_string(member_row, "data"))
+        auto member = decode_record(db_blob(member_row, "data"))
                           .get<ledger::SourceMember>();
         const auto original_count = std::ranges::count_if(
             admission.members, [&](const auto &candidate) {
@@ -1519,10 +1599,9 @@ auto BridgeStateRepository::resolve_reverse_primary(
         if (member.member_id != *output.reverse_primary_member ||
             db_string(member_row, "member_id") != member.member_id ||
             db_string(member_row, "pair_id") != pair ||
-            db_string(member_row, "source_scope") != encode(source) ||
-            db_string(member_row, "target_scope") != encode(target) ||
-            db_string(member_row, "message_ref") !=
-                encode(member.message_ref) ||
+            db_blob(member_row, "source_scope") != encode(source) ||
+            db_blob(member_row, "target_scope") != encode(target) ||
+            db_blob(member_row, "message_ref") != encode(member.message_ref) ||
             original_count > 1 ||
             (original_count == 1 &&
              std::ranges::count(admission.members, member) != 1) ||
@@ -1577,7 +1656,7 @@ namespace {
 auto check_source_binding(obcx::core::IDbConnection &db,
                           const ledger::SourceBinding &operation)
     -> ledger::Admission {
-  require_v4(db);
+  require_current_ledger(db);
   const auto &id = operation.delivery_id;
   const auto admission = admission_from_db(db, id);
   if (operation.member_id.empty() || admission.delivery_id != id)
@@ -1591,14 +1670,14 @@ auto check_source_binding(obcx::core::IDbConnection &db,
     throw std::runtime_error("source operation member not unique");
   const auto &row = members.front();
   const auto member =
-      Json::parse(db_string(row, "data")).get<ledger::SourceMember>();
+      decode_record(db_blob(row, "data")).get<ledger::SourceMember>();
   if (member.member_id != operation.member_id ||
       member.message_ref != operation.message_ref ||
       db_string(row, "member_id") != member.member_id ||
       db_string(row, "pair_id") != admission.pair_id ||
-      db_string(row, "source_scope") != encode(admission.source_scope) ||
-      db_string(row, "target_scope") != encode(admission.target_scope) ||
-      db_string(row, "message_ref") != encode(member.message_ref))
+      db_blob(row, "source_scope") != encode(admission.source_scope) ||
+      db_blob(row, "target_scope") != encode(admission.target_scope) ||
+      db_blob(row, "message_ref") != encode(member.message_ref))
     throw std::runtime_error("source operation member evidence mismatch");
   const auto outputs = db.query(
       std::string{"SELECT attempt_id,revision_id,data FROM "} +
@@ -1623,7 +1702,7 @@ auto check_source_binding(obcx::core::IDbConnection &db,
   } else {
     (void)require_attempt(db, id, db_string(outputs.front(), "attempt_id"));
   }
-  const auto output = Json::parse(db_string(outputs.front(), "data"))
+  const auto output = decode_record(db_blob(outputs.front(), "data"))
                           .get<ledger::PhysicalOutput>();
   if (output.message_ref != operation.anchor_ref ||
       output.reverse_primary_member !=
@@ -1655,7 +1734,7 @@ auto check_source_binding(obcx::core::IDbConnection &db,
                     "o.message_ref=?;",
                 {encode(operation.anchor_ref)})) {
     const auto other =
-        Json::parse(db_string(candidate, "admission")).get<ledger::Admission>();
+        decode_record(db_blob(candidate, "admission")).get<ledger::Admission>();
     if (other.delivery_id != db_string(candidate, "delivery_id"))
       throw std::runtime_error(
           "source operation observation identity mismatch");
@@ -1673,18 +1752,18 @@ auto check_source_binding(obcx::core::IDbConnection &db,
 auto checked_source_operation(obcx::core::IDbConnection &db,
                               const std::string &id,
                               const ledger::SourceOperation &operation)
-    -> std::string {
+    -> DbBlob {
   require_blob(operation.result);
   if (operation.operation_id.empty())
     throw std::invalid_argument("source operation identity required");
   (void)check_source_binding(db, {id, operation.member_id,
                                   operation.message_ref, operation.anchor_ref});
-  return Json(operation).dump();
+  return encode_record(operation);
 }
 auto existing_source_operation(obcx::core::IDbConnection &db,
                                const std::string &id,
                                const ledger::SourceOperation &operation)
-    -> std::optional<std::string> {
+    -> std::optional<DbBlob> {
   const auto rows = db.query("SELECT member_id,message_ref,anchor_ref,data "
                              "FROM bridge_source_operations "
                              "WHERE delivery_id=? AND operation_id=?;",
@@ -1693,27 +1772,28 @@ auto existing_source_operation(obcx::core::IDbConnection &db,
     return std::nullopt;
   if (rows.size() != 1)
     throw std::runtime_error("ambiguous source operation identity");
-  const auto serialized = db_string(rows.front(), "data");
-  const auto existing = Json::parse(serialized).get<ledger::SourceOperation>();
+  const auto &serialized = db_blob(rows.front(), "data");
+  const auto existing =
+      decode_record(serialized).get<ledger::SourceOperation>();
   require_blob(existing.result);
   if (existing.operation_id != operation.operation_id ||
       existing.member_id != operation.member_id ||
       existing.message_ref != operation.message_ref ||
       existing.anchor_ref != operation.anchor_ref ||
       db_string(rows.front(), "member_id") != operation.member_id ||
-      db_string(rows.front(), "message_ref") != encode(operation.message_ref) ||
-      db_string(rows.front(), "anchor_ref") != encode(operation.anchor_ref) ||
+      db_blob(rows.front(), "message_ref") != encode(operation.message_ref) ||
+      db_blob(rows.front(), "anchor_ref") != encode(operation.anchor_ref) ||
       existing.result.codec != operation.result.codec ||
       existing.result.version != operation.result.version ||
-      Json(existing).dump() != serialized)
+      encode_record(existing) != serialized)
     throw std::runtime_error("conflicting source operation evidence");
   return serialized;
 }
 auto checked_output_operation(obcx::core::IDbConnection &db,
                               const std::string &delivery_id,
                               const ledger::OutputOperation &operation)
-    -> std::string {
-  require_v4(db);
+    -> DbBlob {
+  require_current_ledger(db);
   const auto admission = admission_from_db(db, delivery_id);
   if (admission.delivery_id != delivery_id)
     throw std::runtime_error("output operation admission identity mismatch");
@@ -1724,7 +1804,7 @@ auto checked_output_operation(obcx::core::IDbConnection &db,
       std::string{"SELECT attempt_id,revision_id,data FROM "} +
           confirmed_output_rows_sql + " WHERE delivery_id=? AND message_ref=?;",
       {delivery_id, encode(operation.message_ref)});
-  if (rows.size() != 1 || Json::parse(db_string(rows.front(), "data"))
+  if (rows.size() != 1 || decode_record(db_blob(rows.front(), "data"))
                                   .get<ledger::PhysicalOutput>()
                                   .message_ref != operation.message_ref)
     throw std::runtime_error("operation output not confirmed or inconsistent");
@@ -1741,12 +1821,12 @@ auto checked_output_operation(obcx::core::IDbConnection &db,
     (void)require_attempt(db, delivery_id,
                           db_string(rows.front(), "attempt_id"));
   }
-  return Json(operation).dump();
+  return encode_record(operation);
 }
 auto existing_output_operation(obcx::core::IDbConnection &db,
                                const std::string &delivery_id,
                                const ledger::OutputOperation &operation)
-    -> std::optional<std::string> {
+    -> std::optional<DbBlob> {
   const auto rows =
       db.query("SELECT message_ref,data FROM bridge_output_operations WHERE "
                "delivery_id=? AND operation_id=?;",
@@ -1755,15 +1835,16 @@ auto existing_output_operation(obcx::core::IDbConnection &db,
     return std::nullopt;
   if (rows.size() != 1)
     throw std::runtime_error("ambiguous output operation identity");
-  const auto serialized = db_string(rows.front(), "data");
-  const auto existing = Json::parse(serialized).get<ledger::OutputOperation>();
+  const auto &serialized = db_blob(rows.front(), "data");
+  const auto existing =
+      decode_record(serialized).get<ledger::OutputOperation>();
   require_blob(existing.result);
   if (existing.operation_id != operation.operation_id ||
       existing.message_ref != operation.message_ref ||
-      db_string(rows.front(), "message_ref") != encode(operation.message_ref) ||
+      db_blob(rows.front(), "message_ref") != encode(operation.message_ref) ||
       existing.result.codec != operation.result.codec ||
       existing.result.version != operation.result.version ||
-      Json(existing).dump() != serialized)
+      encode_record(existing) != serialized)
     throw std::runtime_error("conflicting output operation evidence");
   return serialized;
 }
@@ -1788,7 +1869,7 @@ void validate_command_operation(const ledger::CommandOperation &operation) {
 auto read_command_operation(obcx::core::IDbConnection &db,
                             const std::string &pair, const std::string &id)
     -> std::optional<ledger::CommandOperation> {
-  require_v4(db);
+  require_current_ledger(db);
   const auto rows = db.query("SELECT * FROM bridge_command_operations WHERE "
                              "pair_id=? AND operation_id=?;",
                              {pair, id});
@@ -1797,20 +1878,20 @@ auto read_command_operation(obcx::core::IDbConnection &db,
   if (rows.size() != 1)
     throw std::runtime_error("ambiguous command operation");
   const auto &row = rows.front();
-  const auto serialized = db_string(row, "data");
-  auto result = Json::parse(serialized).get<ledger::CommandOperation>();
+  const auto &serialized = db_blob(row, "data");
+  auto result = decode_record(serialized).get<ledger::CommandOperation>();
   validate_command_operation(result);
   if (result.pair_id != pair || result.operation_id != id ||
       db_string(row, "pair_id") != pair ||
       db_string(row, "operation_id") != id ||
       db_string(row, "kind") != result.kind ||
-      db_string(row, "command_ref") != encode(result.command_ref) ||
-      Json(result).dump() != serialized)
+      db_blob(row, "command_ref") != encode(result.command_ref) ||
+      encode_record(result) != serialized)
     throw std::runtime_error("command operation storage identity mismatch");
   if (result.source_binding) {
     if (db_string(row, "source_delivery_id") !=
             result.source_binding->delivery_id ||
-        db_string(row, "source_anchor_ref") !=
+        db_blob(row, "source_anchor_ref") !=
             encode(result.source_binding->anchor_ref))
       throw std::runtime_error("command source binding storage mismatch");
   } else if (!std::holds_alternative<std::nullptr_t>(
@@ -1838,7 +1919,7 @@ auto BridgeStateRepository::admit_command_operation(
     throw std::invalid_argument("command admission must be pending");
   return db_manager_.run_transaction<ledger::AdmissionResult>(
       db_instance_, [&](obcx::core::IDbConnection &db) {
-        require_v4(db);
+        require_current_ledger(db);
         if (auto existing = read_command_operation(db, pending.pair_id,
                                                    pending.operation_id)) {
           existing->outcome.reset();
@@ -1866,7 +1947,7 @@ auto BridgeStateRepository::admit_command_operation(
              pending.source_binding ? obcx::core::DbValue{encode(
                                           pending.source_binding->anchor_ref)}
                                     : obcx::core::DbValue{nullptr},
-             Json(pending).dump()});
+             encode_record(pending)});
         if (read_command_operation(db, pending.pair_id, pending.operation_id) !=
             std::optional{pending})
           throw std::runtime_error("command admission not persisted");
@@ -1892,8 +1973,8 @@ auto BridgeStateRepository::finish_command_operation(
           throw std::runtime_error("command checkpoint changed or missing");
         db.execute("UPDATE bridge_command_operations SET data=? WHERE "
                    "pair_id=? AND operation_id=? AND data=?;",
-                   {Json(completed).dump(), pending.pair_id,
-                    pending.operation_id, Json(pending).dump()});
+                   {encode_record(completed), pending.pair_id,
+                    pending.operation_id, encode_record(pending)});
         if (read_command_operation(db, pending.pair_id, pending.operation_id) !=
             std::optional{completed})
           throw std::runtime_error("command finalization not persisted");
@@ -1917,7 +1998,7 @@ auto BridgeStateRepository::admit_source_operation(
                     encode(pending.message_ref), encode(pending.anchor_ref),
                     serialized});
         if (existing_source_operation(db, id, pending) !=
-            std::optional<std::string>{serialized})
+            std::optional{serialized})
           throw std::runtime_error("source operation admission not persisted");
         return ledger::AdmissionResult::Created;
       });
@@ -1937,7 +2018,7 @@ auto BridgeStateRepository::finish_source_operation(
   return db_manager_.run_transaction<ledger::AdmissionResult>(
       db_instance_, [&](obcx::core::IDbConnection &db) {
         const auto initial = checked_source_operation(db, id, pending);
-        const auto terminal = Json(completed).dump();
+        const auto terminal = encode_record(completed);
         const auto existing = existing_source_operation(db, id, pending);
         if (!existing)
           throw std::runtime_error("source operation was not admitted");
@@ -1952,7 +2033,7 @@ auto BridgeStateRepository::finish_source_operation(
             {terminal, id, pending.operation_id, pending.member_id,
              encode(pending.message_ref), encode(pending.anchor_ref), initial});
         if (existing_source_operation(db, id, completed) !=
-            std::optional<std::string>{terminal})
+            std::optional{terminal})
           throw std::runtime_error(
               "source operation finalization not persisted");
         return ledger::AdmissionResult::Created;
@@ -1971,7 +2052,7 @@ auto BridgeStateRepository::admit_output_operation(
             {id, encode(pending.message_ref)});
         if (outputs.size() != 1)
           throw std::runtime_error("mutation admission output disappeared");
-        const auto output = Json::parse(db_string(outputs.front(), "data"))
+        const auto output = decode_record(db_blob(outputs.front(), "data"))
                                 .get<ledger::PhysicalOutput>();
         if (expected_provenance.empty() || !output.provenance ||
             *output.provenance != expected_provenance)
@@ -2009,7 +2090,7 @@ auto BridgeStateRepository::admit_output_operation(
                    {id, pending.operation_id, encode(pending.message_ref),
                     serialized});
         if (existing_output_operation(db, id, pending) !=
-            std::optional<std::string>{serialized})
+            std::optional{serialized})
           throw std::runtime_error("output operation admission not persisted");
         return ledger::AdmissionResult::Created;
       });
@@ -2028,7 +2109,7 @@ auto BridgeStateRepository::finish_output_operation(
   return db_manager_.run_transaction<ledger::AdmissionResult>(
       db_instance_, [&](obcx::core::IDbConnection &db) {
         const auto initial = checked_output_operation(db, id, pending);
-        const auto terminal = Json(completed).dump();
+        const auto terminal = encode_record(completed);
         const auto existing = existing_output_operation(db, id, pending);
         if (!existing)
           throw std::runtime_error("output operation was not admitted");
@@ -2042,7 +2123,7 @@ auto BridgeStateRepository::finish_output_operation(
             {terminal, id, pending.operation_id, encode(pending.message_ref),
              initial});
         if (existing_output_operation(db, id, completed) !=
-            std::optional<std::string>{terminal})
+            std::optional{terminal})
           throw std::runtime_error(
               "output operation finalization not persisted");
         return ledger::AdmissionResult::Created;
@@ -2053,7 +2134,7 @@ void BridgeStateRepository::record_output_operation(
     const std::string &id, const ledger::OutputOperation &operation) {
   db_manager_.run_transaction<void>(
       db_instance_, [&](obcx::core::IDbConnection &db) {
-        require_v4(db);
+        require_current_ledger(db);
         require_blob(operation.result);
         if (operation.operation_id.empty()) {
           throw std::invalid_argument("output operation identity required");
@@ -2070,9 +2151,9 @@ void BridgeStateRepository::record_output_operation(
             db.query("SELECT data FROM bridge_output_operations WHERE "
                      "delivery_id=? AND operation_id=?;",
                      {id, operation.operation_id});
-        const auto serialized = Json(operation).dump();
+        const auto serialized = encode_record(operation);
         if (!existing.empty()) {
-          if (db_string(existing.front(), "data") != serialized) {
+          if (db_blob(existing.front(), "data") != serialized) {
             throw std::runtime_error("conflicting output operation replay");
           }
           return;
@@ -2090,7 +2171,7 @@ auto BridgeStateRepository::prune_completed_retry_payloads(
         "retry cleanup requires positive explicit limit");
   return db_manager_.run_transaction<
       std::int64_t>(db_instance_, [&](obcx::core::IDbConnection &db) {
-    require_v4(db);
+    require_current_ledger(db);
     // A cheap completion hint selects IDs only. The full reconciliation
     // above remains authoritative before any payload is deleted.
     constexpr auto completed_ids =
@@ -2100,8 +2181,7 @@ auto BridgeStateRepository::prune_completed_retry_payloads(
         "1 FROM bridge_delivery_attempts a WHERE "
         "a.delivery_id=r.delivery_id AND a.sequence=(SELECT MAX(sequence) "
         "FROM bridge_delivery_attempts WHERE delivery_id=r.delivery_id) "
-        "AND CASE WHEN json_valid(a.result) THEN "
-        "json_extract(a.result,'$.complete') END=1)";
+        "AND a.complete=1)";
     std::optional<std::string> after;
     std::int64_t removed = 0;
     for (;;) {
@@ -2135,7 +2215,7 @@ auto BridgeStateRepository::reclaim_terminal_retry_payload(
     const std::string &id) -> bool {
   return db_manager_.run_transaction<bool>(
       db_instance_, [&](obcx::core::IDbConnection &db) {
-        require_v4(db);
+        require_current_ledger(db);
         {
           std::scoped_lock lock(retry_activity_->mutex);
           if (retry_activity_->busy(id))
@@ -2152,7 +2232,7 @@ auto BridgeStateRepository::prune_terminal_retry_payloads(
         "retry cleanup requires positive explicit limit");
   return db_manager_.run_transaction<std::int64_t>(
       db_instance_, [&](obcx::core::IDbConnection &db) {
-        require_v4(db);
+        require_current_ledger(db);
         constexpr auto ids =
             "SELECT r.delivery_id FROM bridge_delivery_retries r JOIN "
             "bridge_deliveries d ON d.delivery_id=r.delivery_id WHERE "
@@ -2202,7 +2282,7 @@ auto BridgeStateRepository::list_ready_retry_deliveries(
   }
   return db_manager_.run_transaction<std::vector<
       std::string>>(db_instance_, [&](obcx::core::IDbConnection &db) {
-    require_v4(db);
+    require_current_ledger(db);
     // Retry payloads contain opaque bodies and can be hundreds of MiB.
     // Never materialize them for the whole queue, or parse completed work
     // just to discover that it cannot be retried. Page only IDs using the
@@ -2232,23 +2312,14 @@ auto BridgeStateRepository::list_ready_retry_deliveries(
         const auto admission = admission_from_db(db, id);
         if (!safe_retry(db, admission))
           continue;
-        // Project only the scalar schedule into C++. SQLite may inspect
-        // one large JSON value, but no queue-wide payload copies survive.
+        // Read only the schedule; load and validate bodies for selected IDs.
         const auto schedule =
-            db.query("SELECT CASE WHEN "
-                     "json_type(payload,'$.next_retry_at_ms')='integer' THEN "
-                     "json_extract(payload,'$.next_retry_at_ms') END AS "
-                     "next_retry_at_ms FROM bridge_delivery_retries WHERE "
-                     "delivery_id=?;",
+            db.query("SELECT next_retry_at_ms FROM bridge_delivery_retries "
+                     "WHERE delivery_id=?;",
                      {id});
         if (schedule.size() != 1)
           throw std::runtime_error("retry schedule disappeared");
-        const auto timestamp =
-            std::get_if<std::int64_t>(&schedule.front().at("next_retry_at_ms"));
-        if (timestamp == nullptr)
-          throw std::invalid_argument(
-              "retry schedule must be an integer timestamp");
-        const auto time = *timestamp;
+        const auto time = db_int64(schedule.front(), "next_retry_at_ms");
         if (time > ready_at_ms)
           continue;
         const std::pair candidate{time, id};
@@ -2270,10 +2341,8 @@ auto BridgeStateRepository::list_ready_retry_deliveries(
           {id});
       if (rows.size() != 1)
         throw std::runtime_error("retry payload disappeared");
-      // Parse by reference: db_string would copy the entire opaque body.
-      const auto payload =
-          Json::parse(std::get<std::string>(rows.front().at("payload")))
-              .get<ledger::RetryPayload>();
+      const auto payload = decode_record(db_blob(rows.front(), "payload"))
+                               .get<ledger::RetryPayload>();
       const auto admission = admission_from_db(db, id);
       validate_retry(admission, payload);
       if (payload.next_retry_at_ms != time || !safe_retry(db, admission))
