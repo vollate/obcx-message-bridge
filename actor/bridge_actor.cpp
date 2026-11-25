@@ -479,7 +479,7 @@ auto BridgeActor::handle(
         }
         // Even a zero-effect retry belongs to the durable retry owner, not a
         // replay of MessageStored or the predecessor CQ retry queue.
-        std::string diagnostic = "message was not fully forwarded";
+        std::string diagnostic = "Forward did not finish.";
         bool sent_something = false;
         if (delivery.outcome) {
           if (const auto *failure =
@@ -488,36 +488,41 @@ auto BridgeActor::handle(
             // confirmed/possible effects or granting ingress retry permission.
             const auto reason = classify_bridge_operation_failure(
                 BridgeBotOperationFailure{failure->error});
-            const auto confirmed =
-                std::to_string(failure->confirmed_messages.size());
-            sent_something = !failure->confirmed_messages.empty() ||
-                             failure->may_have_unconfirmed_messages;
-            diagnostic += ": " + reason.diagnostic;
+            const auto count = failure->confirmed_messages.size();
+            const auto messages =
+                count == 1 ? std::string{"1 message was"}
+                           : std::to_string(count) + " messages were";
+            sent_something =
+                count != 0 || failure->may_have_unconfirmed_messages;
             if (failure->may_have_unconfirmed_messages)
-              diagnostic += "; " + confirmed +
-                            " message(s) confirmed sent, others may also have "
-                            "been sent";
-            else if (failure->confirmed_messages.empty())
-              diagnostic += "; nothing was sent";
+              diagnostic = count == 0
+                               ? "Forward result is unknown: it may or may not "
+                                 "have been sent."
+                               : "Forward may be incomplete: " + messages +
+                                     " sent, and more may have been sent.";
+            else if (count == 0)
+              diagnostic = "Forward failed: nothing was sent.";
             else
-              diagnostic +=
-                  "; " + confirmed + " message(s) sent, the rest were not";
+              diagnostic = "Forward was partial: " + messages +
+                           " sent, the rest were not.";
+            diagnostic += " Reason: " + reason.diagnostic + ".";
           } else {
-            diagnostic += ": it was sent, but the delivery record has not "
-                          "been updated yet";
+            diagnostic = "Forward was sent, but the delivery record has not "
+                         "been updated yet.";
           }
         }
         const auto &persisted = delivery.persisted;
         if (!persisted.safe_to_retry) {
-          diagnostic += "; not retried automatically";
           if (sent_something)
-            diagnostic += " to avoid sending duplicates";
+            diagnostic += " Not retried, to avoid sending duplicates.";
           else if (persisted.admission &&
                    std::cmp_greater_equal(persisted.attempts.size(),
                                           persisted.admission->max_attempts))
-            diagnostic += " after " +
+            diagnostic += " Not retried after " +
                           std::to_string(persisted.attempts.size()) +
-                          " attempt(s)";
+                          " attempt(s).";
+          else
+            diagnostic += " Not retried.";
         } else if (persisted.retry && persisted.admission &&
                    persisted.retry->next_retry_at_ms !=
                        std::numeric_limits<std::int64_t>::max()) {
@@ -528,9 +533,9 @@ auto BridgeActor::handle(
           const auto wait_ms = std::max<std::int64_t>(
               0, persisted.retry->next_retry_at_ms - now_ms);
           diagnostic +=
-              "; retrying in " + std::to_string((wait_ms + 999) / 1000) +
+              " Retrying in " + std::to_string((wait_ms + 999) / 1000) +
               "s (attempt " + std::to_string(persisted.retry->retry_count + 1) +
-              " of " + std::to_string(persisted.admission->max_attempts) + ")";
+              " of " + std::to_string(persisted.admission->max_attempts) + ").";
         }
         auto result = obcx::core::ActorResult::failed(
             "bridge_delivery_incomplete", diagnostic, false);

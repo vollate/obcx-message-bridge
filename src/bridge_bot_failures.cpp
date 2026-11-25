@@ -68,16 +68,15 @@ auto classify_bridge_operation_failure(const std::exception &error)
   const bool send_effects =
       send && (!send->failure().confirmed_messages.empty() ||
                send->failure().may_have_unconfirmed_messages);
-  auto diagnostic = std::string{describe_error_code(failure.code)} + " (" +
-                    std::string{obcx::bot::error_code_id(failure.code)};
+  auto diagnostic = failure.message.empty()
+                        ? std::string{describe_error_code(failure.code)}
+                        : obcx::bot::redact_bot_diagnostic(failure.message);
+  diagnostic += " (" + std::string{obcx::bot::error_code_id(failure.code)};
   if (failure.provider_code && !failure.provider_code->empty()) {
     diagnostic += ", platform error " +
                   obcx::bot::redact_bot_diagnostic(*failure.provider_code);
   }
   diagnostic += ")";
-  if (!failure.message.empty()) {
-    diagnostic += ": " + obcx::bot::redact_bot_diagnostic(failure.message);
-  }
   return {
       .retryable = !is_bridge_operation_cancelled(error) && !send_effects &&
                    failure.retryable &&
