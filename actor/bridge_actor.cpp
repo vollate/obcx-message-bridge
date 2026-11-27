@@ -410,6 +410,17 @@ auto BridgeActor::handle(
                                    error.what(), false));
     co_return result;
   }
+  // Use only validated source IDs. In particular, a Telegram message ID
+  // identifies a message within a chat, not across all chats.
+  const auto forward_failure = [&source = stored.source](std::string code,
+                                                         std::string diagnostic,
+                                                         bool retryable) {
+    diagnostic += " [source=" + source.source_platform + " " +
+                  source.conversation_id + " message_id=" + source.message_id +
+                  "]";
+    return obcx::core::ActorResult::failed(std::move(code),
+                                           std::move(diagnostic), retryable);
+  };
   try {
     auto admitted = stored;
     auto forwarded = message;
@@ -442,9 +453,9 @@ auto BridgeActor::handle(
             revision.persisted.observations_match_checkpoint)
           co_return obcx::core::ActorResult::success(); // No replay
                                                         // publication.
-        auto result = obcx::core::ActorResult::failed(
-            "bridge_edit_incomplete", "bridge edit is incomplete or uncertain",
-            false);
+        auto result =
+            forward_failure("bridge_edit_incomplete",
+                            "bridge edit is incomplete or uncertain", false);
         auto notification =
             build_failed_event(message, "bridge_edit_incomplete",
                                "bridge edit is incomplete or uncertain", false);
@@ -538,8 +549,8 @@ auto BridgeActor::handle(
               "s (attempt " + std::to_string(persisted.retry->retry_count + 1) +
               " of " + std::to_string(persisted.admission->max_attempts) + ").";
         }
-        auto result = obcx::core::ActorResult::failed(
-            "bridge_delivery_incomplete", diagnostic, false);
+        auto result =
+            forward_failure("bridge_delivery_incomplete", diagnostic, false);
         auto notification = build_failed_event(
             message, "bridge_delivery_incomplete", diagnostic, false);
         notification.payload["delivery_id"] = delivery.persisted.delivery_id;
@@ -564,32 +575,31 @@ auto BridgeActor::handle(
     // runtime services must not select the predecessor payload-to-mapping path.
     throw std::runtime_error("bridge forwarding runtime is unavailable");
   } catch (const BridgeDeliveryPersistenceFailure &error) {
-    auto result = obcx::core::ActorResult::failed(
-        "bridge_delivery_persistence_failed", error.what(), false);
+    auto result = forward_failure("bridge_delivery_persistence_failed",
+                                  error.what(), false);
     result.emit(bridge_delivery_failure_notification(error));
     co_return result;
   } catch (const BridgeRevisionPersistenceFailure &error) {
-    auto result = obcx::core::ActorResult::failed(
-        "bridge_edit_persistence_failed", error.what(), false);
+    auto result =
+        forward_failure("bridge_edit_persistence_failed", error.what(), false);
     result.emit(bridge_revision_failure_notification(error.result()));
     co_return result;
   } catch (const BridgeRetryUnavailable &error) {
-    auto result = obcx::core::ActorResult::failed("bridge_retry_unavailable",
-                                                  error.what(), true);
+    auto result =
+        forward_failure("bridge_retry_unavailable", error.what(), true);
     result.emit(build_failed_event(message, "bridge_retry_unavailable",
                                    error.what(), true));
     co_return result;
   } catch (const qq::VoicePreparationFailure &error) {
-    auto result = obcx::core::ActorResult::failed(
-        "bridge_voice_preparation_failed", error.what(), false);
+    auto result =
+        forward_failure("bridge_voice_preparation_failed", error.what(), false);
     result.emit(build_failed_event(message, "bridge_voice_preparation_failed",
                                    error.what(), false));
     co_return result;
   } catch (const std::exception &error) {
     // An unclassified exception may follow durable attempt admission or a
     // provider effect. It cannot authorize replay of the original message.
-    auto result =
-        obcx::core::ActorResult::failed("bridge_error", error.what(), false);
+    auto result = forward_failure("bridge_error", error.what(), false);
     result.emit(
         build_failed_event(message, "bridge_error", error.what(), false));
     co_return result;
